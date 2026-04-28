@@ -7,16 +7,19 @@ import {
 	_test,
 	AuthError,
 	deriveStatus,
-	discoverMatches,
-	ensureBotUserId,
-	ensureChannels,
 	matchesPullUrl,
 	prContext,
-	reactToMatch,
-	slackCall,
 	tokenizeAngles,
 	urlsFromMessage,
 } from "./index.js";
+
+const {
+	slackCall,
+	ensureBotUserId,
+	ensureChannels,
+	discoverMatches,
+	reactToMatch,
+} = _test;
 
 // ============================================================ static helpers
 
@@ -118,11 +121,8 @@ test("prContext: extracts owner/repo/num from authoritative payload", () => {
 	});
 });
 
-test("prContext: rejects malformed html_url", () => {
-	assert.equal(
-		prContext({ pull_request: { html_url: "https://github.com/octocat" } }),
-		null,
-	);
+test("prContext: rejects payload with missing structured fields", () => {
+	assert.equal(prContext({ pull_request: { html_url: "x" } }), null);
 });
 
 test("prContext: rejects missing pull_request", () => {
@@ -303,14 +303,14 @@ function shimFetch(scripts) {
 		return {
 			status: r.status ?? 200,
 			ok: (r.status ?? 200) < 400,
-			headers: { get: (k) => r.headers?.[k.toLowerCase()] ?? null },
+			headers: new Headers(r.headers ?? {}),
 			json: async () => r.body,
 		};
 	};
 	return { impl, calls };
 }
 
-test.beforeEach(() => _test.resetSlackClient());
+test.beforeEach(() => _test.reset());
 
 // ---------------------------------------------------------------- slackCall
 
@@ -608,12 +608,14 @@ test("reactToMatch: approved with our bot owning a stale changes-requested remov
 	_test.setFetch(impl);
 	const result = await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
-		"approved",
-		"white_check_mark",
-		"warning",
-		"U0BOT",
-		/* isRerun */ false,
-		"xoxb",
+		{
+			status: "approved",
+			emoji: "white_check_mark",
+			oppositeEmoji: "warning",
+			botUserId: "U0BOT",
+			isRerun: false,
+			token: "xoxb",
+		},
 	);
 	assert.equal(result.ok, true);
 	assert.deepEqual(
@@ -640,12 +642,14 @@ test("reactToMatch: approved without our bot in the warning users array does NOT
 	_test.setFetch(impl);
 	await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
-		"approved",
-		"white_check_mark",
-		"warning",
-		"U0BOT",
-		false,
-		"xoxb",
+		{
+			status: "approved",
+			emoji: "white_check_mark",
+			oppositeEmoji: "warning",
+			botUserId: "U0BOT",
+			isRerun: false,
+			token: "xoxb",
+		},
 	);
 	// No reactions.remove call.
 	assert.deepEqual(
@@ -662,12 +666,14 @@ test("reactToMatch: when isRerun=true, skips the entire flip-cleanup branch (re-
 	_test.setFetch(impl);
 	await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
-		"approved",
-		"white_check_mark",
-		"warning",
-		"U0BOT",
-		/* isRerun */ true,
-		"xoxb",
+		{
+			status: "approved",
+			emoji: "white_check_mark",
+			oppositeEmoji: "warning",
+			botUserId: "U0BOT",
+			isRerun: true,
+			token: "xoxb",
+		},
 	);
 	// No reactions.get, no reactions.remove. Just the additive add.
 	assert.deepEqual(
@@ -685,12 +691,14 @@ test("reactToMatch: tolerated reaction errors (already_reacted) do not throw", a
 	// No oppositeEmoji passed so flip cleanup is skipped.
 	const result = await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
-		"merged",
-		"large_purple_square",
-		null,
-		null,
-		false,
-		"xoxb",
+		{
+			status: "merged",
+			emoji: "large_purple_square",
+			oppositeEmoji: null,
+			botUserId: null,
+			isRerun: false,
+			token: "xoxb",
+		},
 	);
 	assert.equal(result.error, "already_reacted");
 });
@@ -703,12 +711,14 @@ test("reactToMatch: stale-match errors (channel_not_found) surface so caller can
 	_test.setFetch(impl);
 	const result = await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
-		"merged",
-		"large_purple_square",
-		null,
-		null,
-		false,
-		"xoxb",
+		{
+			status: "merged",
+			emoji: "large_purple_square",
+			oppositeEmoji: null,
+			botUserId: null,
+			isRerun: false,
+			token: "xoxb",
+		},
 	);
 	assert.equal(result.error, "channel_not_found");
 });
@@ -722,12 +732,14 @@ test("reactToMatch: invalid_auth on reactions.add propagates as AuthError", asyn
 	await assert.rejects(
 		reactToMatch(
 			{ channel: "C1", ts: "1.0" },
-			"merged",
-			"eyes",
-			null,
-			null,
-			false,
-			"xoxb",
+			{
+				status: "merged",
+				emoji: "eyes",
+				oppositeEmoji: null,
+				botUserId: null,
+				isRerun: false,
+				token: "xoxb",
+			},
 		),
 		(e) => e instanceof AuthError && e.code === "invalid_auth",
 	);

@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import { fileURLToPath } from "node:url";
 
 // ---------------------------------------------------------------- constants
 
@@ -55,10 +54,8 @@ const err = (...a) => console.error(...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowS = () => Math.floor(Date.now() / 1000);
 
-function input(name) {
-	// GHA preserves hyphens in INPUT_* env vars (only spaces become underscores).
-	return process.env[`INPUT_${name.toUpperCase()}`] || "";
-}
+// GHA preserves hyphens in INPUT_* env vars (only spaces become underscores).
+const input = (name) => process.env[`INPUT_${name.toUpperCase()}`] || "";
 
 function maskSecret(s) {
 	if (s) console.log(`::add-mask::${s}`);
@@ -73,21 +70,23 @@ class AuthError extends Error {
 
 // ---------------------------------------------------------------- slack client
 
-let lastSlackCallAt = 0;
-// Test hooks: override the fetch impl and self-pacing during unit tests.
-let _fetch = null;
-let _paceMs = null;
+const slackClient = {
+	lastCallAt: 0,
+	fetch: null, // overridden in tests
+	paceMs: null, // overridden in tests
+};
 
 async function slackCall(method, params, token) {
 	const url = SLACK_API + method;
-	const paceMs = _paceMs ?? SLACK_PACE_MS;
-	const fetchImpl = _fetch ?? globalThis.fetch;
+	const paceMs = slackClient.paceMs ?? SLACK_PACE_MS;
+	const fetchImpl = slackClient.fetch ?? globalThis.fetch;
+	let lastBody;
 	for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-		const wait = paceMs - (Date.now() - lastSlackCallAt);
+		const wait = paceMs - (Date.now() - slackClient.lastCallAt);
 		if (wait > 0) await sleep(wait);
-		lastSlackCallAt = Date.now();
+		slackClient.lastCallAt = Date.now();
 
-		let res, body;
+		let res;
 		try {
 			res = await fetchImpl(url, {
 				method: "POST",
@@ -97,7 +96,7 @@ async function slackCall(method, params, token) {
 				},
 				body: JSON.stringify(params || {}),
 			});
-			body = await res.json();
+			lastBody = await res.json();
 		} catch (e) {
 			warn(
 				`slack ${method} network error: ${e.message} (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
@@ -109,28 +108,24 @@ async function slackCall(method, params, token) {
 
 		const isRateLimited =
 			res.status === 429 ||
-			(body && body.ok === false && body.error === "ratelimited");
-		if (isRateLimited) {
-			const retry = Math.min(
-				parseInt(res.headers.get("retry-after") || "1", 10) || 1,
-				RETRY_AFTER_CAP_S,
-			);
-			log(
-				`slack ${method} ratelimited; retry-after ${retry}s (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
-			);
-			if (attempt >= MAX_RETRIES)
-				return body || { ok: false, error: "ratelimited" };
-			await sleep(retry * 1000);
-			continue;
-		}
+			(lastBody?.ok === false && lastBody.error === "ratelimited");
+		if (!isRateLimited) return lastBody;
 
-		return body;
+		const retry = Math.min(
+			parseInt(res.headers.get("retry-after"), 10) || 1,
+			RETRY_AFTER_CAP_S,
+		);
+		log(
+			`slack ${method} ratelimited; retry-after ${retry}s (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
+		);
+		if (attempt >= MAX_RETRIES) break;
+		await sleep(retry * 1000);
 	}
-	return { ok: false, error: "retries_exhausted" };
+	return lastBody ?? { ok: false, error: "ratelimited" };
 }
 
-function checkAuth(res, _method) {
-	if (res && res.ok === false && AUTH_ERRORS.has(res.error)) {
+function checkAuth(res) {
+	if (res?.ok === false && AUTH_ERRORS.has(res.error)) {
 		throw new AuthError(res.error);
 	}
 }
@@ -215,13 +210,11 @@ function deriveStatus(eventName, payload) {
 
 function prContext(payload) {
 	const pr = payload.pull_request;
-	if (!pr || typeof pr.html_url !== "string") return null;
-	const u = new URL(pr.html_url);
-	const parts = u.pathname.split("/");
-	const num = parseInt(parts[4], 10);
-	if (parts.length !== 5 || parts[3] !== "pull" || !Number.isFinite(num))
-		return null;
-	return { owner: parts[1], repo: parts[2], num, prUrl: pr.html_url };
+	const owner = pr?.base?.repo?.owner?.login;
+	const repo = pr?.base?.repo?.name;
+	const num = pr?.number;
+	if (!owner || !repo || !Number.isFinite(num)) return null;
+	return { owner, repo, num, prUrl: pr.html_url };
 }
 
 // ---------------------------------------------------------------- discovery
@@ -281,7 +274,11 @@ async function discoverMatches(channels, owner, repo, num, token) {
 		scanned++;
 		let cursor = "";
 		let foundInChannel = false;
-		for (let page = 0; page < HISTORY_PAGES_PER_CHANNEL; page++) {
+		for (
+			let page = 0;
+			page < HISTORY_PAGES_PER_CHANNEL && !foundInChannel;
+			page++
+		) {
 			const params = { channel: ch.id, oldest, limit: 200 };
 			if (cursor) params.cursor = cursor;
 			const res = await slackCall("conversations.history", params, token);
@@ -291,12 +288,12 @@ async function discoverMatches(channels, owner, repo, num, token) {
 				break;
 			}
 			for (const msg of res.messages || []) {
-				for (const cand of urlsFromMessage(msg)) {
-					if (matchesPullUrl(cand, owner, repo, num)) {
-						matches.push({ channel: ch.id, ts: msg.ts });
-						foundInChannel = true;
-						break;
-					}
+				if (
+					urlsFromMessage(msg).some((c) => matchesPullUrl(c, owner, repo, num))
+				) {
+					matches.push({ channel: ch.id, ts: msg.ts });
+					foundInChannel = true;
+					break;
 				}
 			}
 			cursor = res.response_metadata?.next_cursor || "";
@@ -309,43 +306,31 @@ async function discoverMatches(channels, owner, repo, num, token) {
 
 // ---------------------------------------------------------------- reactions
 
-async function reactToMatch(
-	match,
-	status,
-	emoji,
-	oppositeEmoji,
-	botUserId,
-	isRerun,
-	token,
-) {
+async function reactToMatch(match, ctx) {
+	const { status, emoji, oppositeEmoji, botUserId, isRerun, token } = ctx;
+	const where = `${match.channel}/${match.ts}`;
+
 	if (!isRerun && oppositeEmoji) {
 		const got = await slackCall(
 			"reactions.get",
-			{
-				channel: match.channel,
-				timestamp: match.ts,
-				full: true,
-			},
+			{ channel: match.channel, timestamp: match.ts, full: true },
 			token,
 		);
 		checkAuth(got);
 		if (got.ok) {
-			const reactions = got.message?.reactions || [];
-			const opp = reactions.find((r) => r.name === oppositeEmoji);
-			if (opp && (opp.users || []).includes(botUserId)) {
+			const opp = (got.message?.reactions || []).find(
+				(r) => r.name === oppositeEmoji,
+			);
+			if (opp?.users?.includes(botUserId)) {
 				const rm = await slackCall(
 					"reactions.remove",
-					{
-						channel: match.channel,
-						timestamp: match.ts,
-						name: oppositeEmoji,
-					},
+					{ channel: match.channel, timestamp: match.ts, name: oppositeEmoji },
 					token,
 				);
 				checkAuth(rm);
 				log(
 					JSON.stringify({
-						match: `${match.channel}/${match.ts}`,
+						match: where,
 						status,
 						action: "remove",
 						name: oppositeEmoji,
@@ -355,23 +340,19 @@ async function reactToMatch(
 				);
 			}
 		} else if (!TOLERATED_REACTION_ERRORS.has(got.error)) {
-			warn(`reactions.get ${match.channel}/${match.ts}: ${got.error}`);
+			warn(`reactions.get ${where}: ${got.error}`);
 		}
 	}
 
 	const add = await slackCall(
 		"reactions.add",
-		{
-			channel: match.channel,
-			timestamp: match.ts,
-			name: emoji,
-		},
+		{ channel: match.channel, timestamp: match.ts, name: emoji },
 		token,
 	);
 	checkAuth(add);
 	log(
 		JSON.stringify({
-			match: `${match.channel}/${match.ts}`,
+			match: where,
 			status,
 			action: "add",
 			name: emoji,
@@ -390,22 +371,31 @@ const CACHE_BASE = (() => {
 	return url.endsWith("/") ? url : `${url}/`;
 })();
 const CACHE_TOKEN = process.env.ACTIONS_RUNTIME_TOKEN || "";
-const CACHE_HEADERS = () => ({
+const CACHE_HEADERS = {
 	Authorization: `Bearer ${CACHE_TOKEN}`,
 	Accept: "application/json;api-version=6.0-preview.1",
-});
+};
+
+const cacheUrl = (path) => new URL(`_apis/artifactcache/${path}`, CACHE_BASE);
+
+async function cacheFetch(path, init = {}) {
+	return fetch(cacheUrl(path), {
+		...init,
+		headers: { ...CACHE_HEADERS, ...(init.headers || {}) },
+	});
+}
 
 async function cacheRestore() {
 	if (!CACHE_BASE || !CACHE_TOKEN) return null;
 	try {
-		const u = new URL("_apis/artifactcache/cache", CACHE_BASE);
+		const u = cacheUrl("cache");
 		// Primary key won't match anything we ever save; second is the prefix.
 		u.searchParams.set(
 			"keys",
 			`${CACHE_KEY_PREFIX}__sentinel__,${CACHE_KEY_PREFIX}`,
 		);
 		u.searchParams.set("version", CACHE_VERSION);
-		const res = await fetch(u, { headers: CACHE_HEADERS() });
+		const res = await fetch(u, { headers: CACHE_HEADERS });
 		if (res.status === 204) {
 			log("cache: cold (no prior entry)");
 			return null;
@@ -421,8 +411,7 @@ async function cacheRestore() {
 			warn(`cache blob fetch status ${blob.status}`);
 			return null;
 		}
-		const text = await blob.text();
-		const state = JSON.parse(text);
+		const state = JSON.parse(await blob.text());
 		log(`cache: restored ${meta.cacheKey}`);
 		return state;
 	} catch (e) {
@@ -436,51 +425,40 @@ async function cacheSave(state, key) {
 	try {
 		const body = Buffer.from(JSON.stringify(state), "utf8");
 
-		const reserveRes = await fetch(
-			new URL("_apis/artifactcache/caches", CACHE_BASE),
-			{
-				method: "POST",
-				headers: { ...CACHE_HEADERS(), "Content-Type": "application/json" },
-				body: JSON.stringify({
-					key,
-					version: CACHE_VERSION,
-					cacheSize: body.length,
-				}),
-			},
-		);
+		const reserveRes = await cacheFetch("caches", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				key,
+				version: CACHE_VERSION,
+				cacheSize: body.length,
+			}),
+		});
 		if (!reserveRes.ok) {
 			warn(`cache reserve status ${reserveRes.status}`);
 			return;
 		}
-		const reserveJson = await reserveRes.json();
-		const cacheId = reserveJson?.cacheId;
+		const cacheId = (await reserveRes.json())?.cacheId;
 		if (!cacheId) return;
 
-		const uploadRes = await fetch(
-			new URL(`_apis/artifactcache/caches/${cacheId}`, CACHE_BASE),
-			{
-				method: "PATCH",
-				headers: {
-					...CACHE_HEADERS(),
-					"Content-Type": "application/octet-stream",
-					"Content-Range": `bytes 0-${body.length - 1}/*`,
-				},
-				body,
+		const uploadRes = await cacheFetch(`caches/${cacheId}`, {
+			method: "PATCH",
+			headers: {
+				"Content-Type": "application/octet-stream",
+				"Content-Range": `bytes 0-${body.length - 1}/*`,
 			},
-		);
+			body,
+		});
 		if (!uploadRes.ok) {
 			warn(`cache upload status ${uploadRes.status}`);
 			return;
 		}
 
-		const commitRes = await fetch(
-			new URL(`_apis/artifactcache/caches/${cacheId}`, CACHE_BASE),
-			{
-				method: "POST",
-				headers: { ...CACHE_HEADERS(), "Content-Type": "application/json" },
-				body: JSON.stringify({ size: body.length }),
-			},
-		);
+		const commitRes = await cacheFetch(`caches/${cacheId}`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ size: body.length }),
+		});
 		if (!commitRes.ok) {
 			warn(`cache commit status ${commitRes.status}`);
 			return;
@@ -515,9 +493,7 @@ async function main() {
 		return;
 	}
 
-	const emoji = (
-		process.env[`INPUT_EMOJI-${status.toUpperCase()}`] || ""
-	).trim();
+	const emoji = input(`emoji-${status}`).trim();
 	if (!emoji) {
 		log(`status ${status} has no configured emoji; skipping`);
 		return;
@@ -525,24 +501,23 @@ async function main() {
 
 	const opposite = FLIP_OPPOSITE[status] || null;
 	const oppositeEmoji = opposite
-		? (process.env[`INPUT_EMOJI-${opposite.toUpperCase()}`] || "").trim() ||
-			null
+		? input(`emoji-${opposite}`).trim() || null
 		: null;
 
-	const isRerun = parseInt(process.env.GITHUB_RUN_ATTEMPT || "1", 10) > 1;
-	if (isRerun) log(`run_attempt > 1: skipping flip cleanup for safety`);
+	const isRerun = parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) > 1;
+	if (isRerun) log("run_attempt > 1: skipping flip cleanup for safety");
 
-	const ctx = prContext(payload);
-	if (!ctx) {
+	const prCtx = prContext(payload);
+	if (!prCtx) {
 		err("could not derive PR context from payload");
 		return;
 	}
-	const prKey = `${ctx.owner}/${ctx.repo}#${ctx.num}`;
+	const prKey = `${prCtx.owner}/${prCtx.repo}#${prCtx.num}`;
 
 	const state = (await cacheRestore()) || {};
 	state.prMatches = state.prMatches || {};
+	let dirty = false;
 
-	// Stale sweep at run start.
 	const staleCutoff = nowS() - PR_STALE_TTL_S;
 	let swept = 0;
 	for (const k of Object.keys(state.prMatches)) {
@@ -551,32 +526,45 @@ async function main() {
 			swept++;
 		}
 	}
-	if (swept > 0)
+	if (swept > 0) {
 		log(`cache: swept ${swept} stale entr${swept === 1 ? "y" : "ies"}`);
+		dirty = true;
+	}
 
 	try {
 		let matches;
-		if (state.prMatches[prKey]?.matches?.length) {
-			matches = state.prMatches[prKey].matches;
+		const cached = state.prMatches[prKey]?.matches;
+		if (cached?.length) {
+			matches = cached;
 			log(`cache hit for ${prKey}: ${matches.length} match(es)`);
 		} else {
 			await ensureBotUserId(state, token);
 			const channels = await ensureChannels(state, token);
 			log(
-				`scanning ${Math.min(channels.length, MAX_CHANNELS_PER_RUN)} channel(s) for ${ctx.prUrl}`,
+				`scanning ${Math.min(channels.length, MAX_CHANNELS_PER_RUN)} channel(s) for ${prCtx.prUrl}`,
 			);
 			matches = await discoverMatches(
 				channels,
-				ctx.owner,
-				ctx.repo,
-				ctx.num,
+				prCtx.owner,
+				prCtx.repo,
+				prCtx.num,
 				token,
 			);
 			log(`discovery: ${matches.length} match(es) for ${prKey}`);
+			dirty = true;
 		}
 
-		if (oppositeEmoji && !isRerun && matches.length) {
-			await ensureBotUserId(state, token);
+		const reactCtx = {
+			status,
+			emoji,
+			oppositeEmoji,
+			botUserId: state.botUserId, // populated above when discovery ran; null on cache hit
+			isRerun,
+			token,
+		};
+		// Cache-hit + flip-cleanup needs botUserId; ensure once here.
+		if (oppositeEmoji && !isRerun && matches.length && !reactCtx.botUserId) {
+			reactCtx.botUserId = await ensureBotUserId(state, token);
 		}
 
 		const survivors = [];
@@ -589,19 +577,11 @@ async function main() {
 				break;
 			}
 			reacted++;
-			const result = await reactToMatch(
-				m,
-				status,
-				emoji,
-				oppositeEmoji,
-				state.botUserId,
-				isRerun,
-				token,
-			);
+			const result = await reactToMatch(m, reactCtx);
 			if (!STALE_MATCH_ERRORS.has(result.error)) survivors.push(m);
 		}
 
-		// Cache update for this PR.
+		const before = JSON.stringify(state.prMatches[prKey] ?? null);
 		if (status === STATUS_MERGED || status === STATUS_CLOSED) {
 			delete state.prMatches[prKey];
 		} else if (survivors.length) {
@@ -609,8 +589,9 @@ async function main() {
 		} else {
 			delete state.prMatches[prKey];
 		}
+		const after = JSON.stringify(state.prMatches[prKey] ?? null);
+		if (before !== after) dirty = true;
 
-		// Safety cap.
 		const keys = Object.keys(state.prMatches);
 		if (keys.length > MAX_PR_ENTRIES) {
 			keys.sort(
@@ -621,6 +602,7 @@ async function main() {
 			const evict = keys.slice(0, keys.length - MAX_PR_ENTRIES);
 			for (const k of evict) delete state.prMatches[k];
 			warn(`pr-entries safety cap; evicted ${evict.length}`);
+			dirty = true;
 		}
 	} catch (e) {
 		if (e instanceof AuthError) {
@@ -632,47 +614,51 @@ async function main() {
 		throw e;
 	}
 
+	if (!dirty) {
+		log("cache: state unchanged; skipping save");
+		return;
+	}
 	const runId = process.env.GITHUB_RUN_ID || "norunid";
 	const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
 	await cacheSave(state, `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`);
 }
 
-// pure helpers
+// Public: pure helpers and the AuthError. Anything that mutates module state
+// or makes network calls lives behind `_test` so the surface stays clean.
 export {
 	AUTH_ERRORS,
 	AuthError,
 	deriveStatus,
-	discoverMatches,
-	ensureBotUserId,
-	ensureChannels,
 	FLIP_OPPOSITE,
 	matchesPullUrl,
 	prContext,
-	reactToMatch,
 	STALE_MATCH_ERRORS,
-	// dynamic surface for fetch-shim tests
-	slackCall,
 	TOLERATED_REACTION_ERRORS,
 	tokenizeAngles,
 	urlsFromMessage,
 };
 
 export const _test = {
+	slackCall,
+	ensureBotUserId,
+	ensureChannels,
+	discoverMatches,
+	reactToMatch,
 	setFetch(fn) {
-		_fetch = fn;
+		slackClient.fetch = fn;
 	},
 	setPaceMs(ms) {
-		_paceMs = ms;
+		slackClient.paceMs = ms;
 	},
-	resetSlackClient() {
-		lastSlackCallAt = 0;
-		_fetch = null;
-		_paceMs = null;
+	reset() {
+		slackClient.lastCallAt = 0;
+		slackClient.fetch = null;
+		slackClient.paceMs = null;
 	},
 };
 
 // Run main only when invoked as the action's entrypoint, not when imported.
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (process.argv[1] && import.meta.filename === process.argv[1]) {
 	main().catch((e) => {
 		err(e?.stack || String(e));
 		process.exit(1);
