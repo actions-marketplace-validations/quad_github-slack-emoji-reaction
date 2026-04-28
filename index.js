@@ -565,9 +565,13 @@ async function main() {
 		let reacted = 0;
 		for (const m of matches) {
 			if (reacted >= REACTIONS_PER_RUN_CAP) {
+				const remaining = matches.slice(reacted);
 				warn(
-					`reactions-per-run cap (${REACTIONS_PER_RUN_CAP}) reached; ${matches.length - reacted} skipped`,
+					`reactions-per-run cap (${REACTIONS_PER_RUN_CAP}) reached; ${remaining.length} skipped (kept in cache for next run)`,
 				);
+				// Preserve un-iterated matches in the cache; otherwise the cap silently
+				// truncates the entry and the next run has to re-discover them.
+				survivors.push(...remaining);
 				break;
 			}
 			reacted++;
