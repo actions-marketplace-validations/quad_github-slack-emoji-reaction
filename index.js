@@ -488,9 +488,11 @@ export async function reactToMatch(match, ctx) {
 	return { ok: !!add.ok, error: add.error };
 }
 
-// Returns nothing on success or routine no-op skips; returns an
-// operator-facing message string when the run can't proceed.
-async function main() {
+// Read everything we need from the env + payload. Returns:
+//   - a string  → operator-facing error; main returns it for exit 1.
+//   - undefined → routine skip (unmapped event, no emoji, fork PR).
+//   - an object → the job specification to run.
+function readJob() {
 	const eventPath = process.env.GITHUB_EVENT_PATH;
 	if (!eventPath)
 		return "GITHUB_EVENT_PATH not set; not running inside GitHub Actions";
@@ -501,7 +503,6 @@ async function main() {
 
 	const status = deriveStatus(eventName, payload);
 	if (!status) return;
-
 	const emoji = input(`emoji-${status}`).trim();
 	if (!emoji) return;
 
@@ -511,48 +512,50 @@ async function main() {
 		if (payload.pull_request?.head?.repo?.fork) return;
 		return "slack-token is missing; set the SLACK_TOKEN secret";
 	}
-	console.log(`::add-mask::${token}`);
 
 	const prCtx = prContext(payload);
 	if (!prCtx) return "could not derive PR context from payload";
-	const prKey = `${prCtx.owner}/${prCtx.repo}#${prCtx.num}`;
 
 	const opposite = FLIP_OPPOSITE[status];
-	const oppositeEmoji = opposite ? input(`emoji-${opposite}`).trim() : "";
-	const isRerun = parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) > 1;
-
-	const slack = new SlackClient({ token });
-	const cache = new CacheClient();
-	const state = (await cache.restore()) ?? {};
-	const prMatches = new PrMatches(state.prMatches);
-	prMatches.sweepStale(nowS() - PR_STALE_TTL_S);
-
-	let matches = prMatches.get(prKey);
-	if (!matches?.length) {
-		await ensureBotUserId(state, slack);
-		const channels = await ensureChannels(state, slack);
-		matches = await discoverMatches(
-			channels,
-			prCtx.owner,
-			prCtx.repo,
-			prCtx.num,
-			slack,
-		);
-	}
-
-	const reactCtx = {
+	return {
+		status,
 		emoji,
-		oppositeEmoji,
+		token,
+		oppositeEmoji: opposite ? input(`emoji-${opposite}`).trim() : "",
+		isRerun: parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) > 1,
+		prCtx,
+		prKey: `${prCtx.owner}/${prCtx.repo}#${prCtx.num}`,
+	};
+}
+
+async function findMatches(prMatches, job, state, slack) {
+	const cached = prMatches.get(job.prKey);
+	if (cached?.length) return cached;
+	await ensureBotUserId(state, slack);
+	const channels = await ensureChannels(state, slack);
+	return discoverMatches(
+		channels,
+		job.prCtx.owner,
+		job.prCtx.repo,
+		job.prCtx.num,
+		slack,
+	);
+}
+
+// React to as many matches as the per-run cap allows; carry the rest over
+// in the cache so the next event for this PR picks them up.
+async function applyReactions(matches, job, state, slack) {
+	const ctx = {
+		emoji: job.emoji,
+		oppositeEmoji: job.oppositeEmoji,
 		botUserId: state.botUserId,
-		isRerun,
+		isRerun: job.isRerun,
 		slack,
 	};
-	if (oppositeEmoji && !isRerun && matches.length && !reactCtx.botUserId) {
-		reactCtx.botUserId = await ensureBotUserId(state, slack);
+	if (job.oppositeEmoji && !job.isRerun && matches.length && !ctx.botUserId) {
+		ctx.botUserId = await ensureBotUserId(state, slack);
 	}
 
-	// React to as many matches as the per-run cap allows; carry the rest over
-	// in the cache so the next event for this PR picks them up.
 	const toReact = matches.slice(0, REACTIONS_PER_RUN_CAP);
 	const overflow = matches.slice(REACTIONS_PER_RUN_CAP);
 	if (overflow.length) {
@@ -562,25 +565,49 @@ async function main() {
 	}
 
 	const reacted = [];
-	for (const m of toReact) reacted.push([m, await reactToMatch(m, reactCtx)]);
-	const survivors = [
+	for (const m of toReact) reacted.push([m, await reactToMatch(m, ctx)]);
+	return [
 		...reacted.filter(([, r]) => keepsMatch(r)).map(([m]) => m),
 		...overflow,
 	];
+}
 
-	// Terminal events delete the entry; otherwise rewrite (bumping lastTouched
-	// so active PRs don't age out of the 90-day stale sweep).
-	const isTerminal = status === STATUS_MERGED || status === STATUS_CLOSED;
-	if (isTerminal || !survivors.length) prMatches.delete(prKey);
-	else prMatches.set(prKey, survivors);
+// Terminal events delete the entry; otherwise rewrite (bumping lastTouched
+// so active PRs don't age out of the 90-day stale sweep).
+function finalizeMatches(prMatches, job, survivors) {
+	const isTerminal =
+		job.status === STATUS_MERGED || job.status === STATUS_CLOSED;
+	if (isTerminal || !survivors.length) prMatches.delete(job.prKey);
+	else prMatches.set(job.prKey, survivors);
 
 	const evicted = prMatches.capByLru(MAX_PR_ENTRIES);
 	if (evicted) console.warn(`pr-entries safety cap; evicted ${evicted}`);
+}
 
-	state.prMatches = prMatches.toJSON();
+function saveKey() {
 	const runId = process.env.GITHUB_RUN_ID || "norunid";
 	const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
-	await cache.save(state, `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`);
+	return `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`;
+}
+
+async function main() {
+	const job = readJob();
+	if (typeof job === "string") return job;
+	if (!job) return;
+	console.log(`::add-mask::${job.token}`);
+
+	const slack = new SlackClient({ token: job.token });
+	const cache = new CacheClient();
+	const state = (await cache.restore()) ?? {};
+	const prMatches = new PrMatches(state.prMatches);
+	prMatches.sweepStale(nowS() - PR_STALE_TTL_S);
+
+	const matches = await findMatches(prMatches, job, state, slack);
+	const survivors = await applyReactions(matches, job, state, slack);
+	finalizeMatches(prMatches, job, survivors);
+
+	state.prMatches = prMatches.toJSON();
+	await cache.save(state, saveKey());
 }
 
 if (import.meta.main) {
