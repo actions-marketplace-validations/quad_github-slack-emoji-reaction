@@ -1,0 +1,13 @@
+{
+  "name": "github-slack-emoji-reaction",
+  "version": "1.0.0",
+  "description": "GitHub Action that reacts on Slack messages linking to a GitHub PR with PR-status emoji.",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

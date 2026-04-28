@@ -1,0 +1,21 @@
+name: github-slack-emoji-reaction
+description: React on Slack messages linking to a GitHub PR with PR-status emoji.
+inputs:
+  slack-token:
+    required: true
+    description: Slack bot token (xoxb-…) with channels:read, groups:read, channels:history, groups:history, reactions:read, reactions:write.
+  emoji-approved:
+    required: false
+    description: Emoji name (no colons) to react with on PR approval.
+  emoji-changes-requested:
+    required: false
+    description: Emoji name to react with on changes-requested review.
+  emoji-merged:
+    required: false
+    description: Emoji name to react with on PR merge.
+  emoji-closed:
+    required: false
+    description: Emoji name to react with on PR close-without-merge.
+runs:
+  using: node20
+  main: index.js

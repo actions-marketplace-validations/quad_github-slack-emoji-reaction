@@ -1,0 +1,20 @@
+display_information:
+  name: GitHub PR Reactions
+  description: Reacts to Slack messages with emoji reflecting GitHub PR state.
+features:
+  bot_user:
+    display_name: github-pr-reactions
+    always_online: false
+oauth_config:
+  scopes:
+    bot:
+      - channels:read
+      - groups:read
+      - channels:history
+      - groups:history
+      - reactions:read
+      - reactions:write
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

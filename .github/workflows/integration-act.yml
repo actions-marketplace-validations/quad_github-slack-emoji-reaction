@@ -1,0 +1,27 @@
+# Integration test workflow for local act runs.
+# Triggers include pull_request / pull_request_review so act can match them,
+# but the job body is gated on env.ACT so on real GitHub-hosted CI the job
+# is a no-op.
+name: integration-act
+
+on:
+  pull_request:
+  pull_request_review:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  react:
+    # Real GitHub sets github.actor to a user; act defaults it to nektos/act.
+    if: ${{ github.actor == 'nektos/act' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          slack-token: ${{ secrets.SLACK_TOKEN }}
+          emoji-approved:           white_check_mark
+          emoji-changes-requested:  warning
+          emoji-merged:             large_purple_square
+          emoji-closed:             x
