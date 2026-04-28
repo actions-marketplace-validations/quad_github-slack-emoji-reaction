@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "GitHub Action that reacts on Slack messages linking to a GitHub PR with PR-status emoji.",
   "private": true,
+  "type": "module",
   "main": "index.js",
   "scripts": {
     "test": "node --test"

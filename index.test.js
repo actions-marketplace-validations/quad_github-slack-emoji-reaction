@@ -1,24 +1,21 @@
-'use strict';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-
-const action = require('./index.js');
-const {
+import {
   deriveStatus, prContext,
   matchesPullUrl, urlsFromMessage, tokenizeAngles,
   slackCall, ensureBotUserId, ensureChannels, discoverMatches, reactToMatch,
   AuthError,
   _test,
-} = action;
+} from './index.js';
 
 // ============================================================ static helpers
 
 // Authoritative payloads vendored from octokit/webhooks; see fixtures/SOURCE.md.
 const upstream = (rel) =>
-  JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures', 'upstream', rel), 'utf8'));
+  JSON.parse(fs.readFileSync(path.join(import.meta.dirname, 'fixtures', 'upstream', rel), 'utf8'));
 
 // Variant builder: deep-clone the upstream payload, apply a single-field patch.
 const variant = (rel, patch) => {

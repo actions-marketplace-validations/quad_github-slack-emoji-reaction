@@ -1,6 +1,5 @@
-'use strict';
-
-const fs = require('fs');
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 // ---------------------------------------------------------------- constants
 
@@ -493,21 +492,23 @@ async function main() {
   await cacheSave(state, `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`);
 }
 
-if (require.main === module) {
-  main().catch(e => { err(e && e.stack || String(e)); process.exit(1); });
-}
-
-module.exports = {
-  // pure helpers
+// pure helpers
+export {
   deriveStatus, prContext,
   matchesPullUrl, urlsFromMessage, tokenizeAngles,
   FLIP_OPPOSITE, AUTH_ERRORS, TOLERATED_REACTION_ERRORS, STALE_MATCH_ERRORS,
   AuthError,
   // dynamic surface for fetch-shim tests
   slackCall, ensureBotUserId, ensureChannels, discoverMatches, reactToMatch,
-  _test: {
-    setFetch(fn) { _fetch = fn; },
-    setPaceMs(ms) { _paceMs = ms; },
-    resetSlackClient() { lastSlackCallAt = 0; _fetch = null; _paceMs = null; },
-  },
 };
+
+export const _test = {
+  setFetch(fn) { _fetch = fn; },
+  setPaceMs(ms) { _paceMs = ms; },
+  resetSlackClient() { lastSlackCallAt = 0; _fetch = null; _paceMs = null; },
+};
+
+// Run main only when invoked as the action's entrypoint, not when imported.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch(e => { err(e && e.stack || String(e)); process.exit(1); });
+}
