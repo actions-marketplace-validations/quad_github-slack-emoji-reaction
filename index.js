@@ -488,21 +488,15 @@ export async function reactToMatch(match, ctx) {
 	return { ok: !!add.ok, error: add.error };
 }
 
+// Returns nothing on success or routine no-op skips; returns an
+// operator-facing message string when the run can't proceed.
 async function main() {
 	const eventPath = process.env.GITHUB_EVENT_PATH;
-	if (!eventPath) {
-		console.error(
-			"GITHUB_EVENT_PATH not set; not running inside GitHub Actions",
-		);
-		process.exit(1);
-	}
+	if (!eventPath)
+		return "GITHUB_EVENT_PATH not set; not running inside GitHub Actions";
 	const eventName = process.env.GITHUB_EVENT_NAME;
-	if (!eventName) {
-		console.error(
-			"GITHUB_EVENT_NAME not set; not running inside GitHub Actions",
-		);
-		process.exit(1);
-	}
+	if (!eventName)
+		return "GITHUB_EVENT_NAME not set; not running inside GitHub Actions";
 	const payload = JSON.parse(fs.readFileSync(eventPath, "utf8"));
 
 	const status = deriveStatus(eventName, payload);
@@ -515,16 +509,12 @@ async function main() {
 	if (!token) {
 		// Fork PRs run with empty secrets by design — that's not a misconfig.
 		if (payload.pull_request?.head?.repo?.fork) return;
-		console.error("slack-token is missing; set the SLACK_TOKEN secret");
-		process.exit(1);
+		return "slack-token is missing; set the SLACK_TOKEN secret";
 	}
 	console.log(`::add-mask::${token}`);
 
 	const prCtx = prContext(payload);
-	if (!prCtx) {
-		console.error("could not derive PR context from payload");
-		process.exit(1);
-	}
+	if (!prCtx) return "could not derive PR context from payload";
 	const prKey = `${prCtx.owner}/${prCtx.repo}#${prCtx.num}`;
 
 	const opposite = FLIP_OPPOSITE[status];
@@ -593,4 +583,10 @@ async function main() {
 	await cache.save(state, `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`);
 }
 
-if (import.meta.main) main();
+if (import.meta.main) {
+	main().then((message) => {
+		if (!message) return;
+		console.error(message);
+		process.exit(1);
+	});
+}
