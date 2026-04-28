@@ -46,7 +46,7 @@ const MAX_RETRIES = 3;
 const CACHE_KEY_PREFIX = "slack-emoji-reactions-state-";
 const CACHE_VERSION = "slack-emoji-reactions-v1";
 
-// ---------------------------------------------------------------- helpers
+// ---------------------------------------------------------------- pure helpers
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowS = () => Math.floor(Date.now() / 1000);
@@ -72,9 +72,81 @@ const capByLru = (entries, max) => {
 
 const keepsMatch = (result) => !STALE_MATCH_ERRORS.has(result.error);
 
-// Thrown deep inside slack.call when Slack returns an auth-class error and
-// caught by the entrypoint at the bottom of this file. The message is
-// operator-facing and lives on the exception itself.
+// ---------------------------------------------------------------- url + event
+
+export function tokenizeAngles(text) {
+	const out = [];
+	let i = 0;
+	while (i < text.length) {
+		const lt = text.indexOf("<", i);
+		if (lt < 0) break;
+		const gt = text.indexOf(">", lt + 1);
+		if (gt < 0) break;
+		let cand = text.slice(lt + 1, gt);
+		const pipe = cand.indexOf("|");
+		if (pipe >= 0) cand = cand.slice(0, pipe);
+		out.push(cand);
+		i = gt + 1;
+	}
+	return out;
+}
+
+function walkForUrls(node) {
+	if (!node || typeof node !== "object") return [];
+	const here = typeof node.url === "string" ? [node.url] : [];
+	return here.concat(...Object.values(node).map(walkForUrls));
+}
+
+export function urlsFromMessage(message) {
+	const fromText =
+		typeof message.text === "string" ? tokenizeAngles(message.text) : [];
+	const fromAttachments = (message.attachments || []).flatMap((a) =>
+		[a.title_link, a.from_url].filter((s) => typeof s === "string"),
+	);
+	const fromBlocks = (message.blocks || []).flatMap(walkForUrls);
+	return [...fromText, ...fromAttachments, ...fromBlocks];
+}
+
+// `:num` only consumes up to the next `/`, so /pull/123 matches and
+// /pull/1234 / /pull/123/files don't — the substring trap closed at the parser.
+const PR_URL = new URLPattern({
+	protocol: "https",
+	hostname: "github.com",
+	pathname: "/:owner/:repo/pull/:num",
+});
+
+export function matchesPullUrl(candidate, owner, repo, num) {
+	const g = PR_URL.exec(candidate)?.pathname.groups;
+	return !!g && g.owner === owner && g.repo === repo && g.num === String(num);
+}
+
+export function deriveStatus(eventName, payload) {
+	if (eventName === "pull_request_review") {
+		if (payload.action !== "submitted") return null;
+		const state = payload.review?.state;
+		if (state === "approved") return STATUS_APPROVED;
+		if (state === "changes_requested") return STATUS_CHANGES_REQUESTED;
+		return null;
+	}
+	if (eventName === "pull_request") {
+		if (payload.action !== "closed") return null;
+		return payload.pull_request?.merged ? STATUS_MERGED : STATUS_CLOSED;
+	}
+	return null;
+}
+
+export function prContext(payload) {
+	const pr = payload.pull_request;
+	const owner = pr?.base?.repo?.owner?.login;
+	const repo = pr?.base?.repo?.name;
+	const num = pr?.number;
+	if (!owner || !repo || !Number.isFinite(num)) return null;
+	return { owner, repo, num, prUrl: pr.html_url };
+}
+
+// ---------------------------------------------------------------- auth error
+
+// Carries its own operator-facing message; the entrypoint catch prints it.
 export class AuthError extends Error {
 	constructor(code) {
 		super(
@@ -84,7 +156,13 @@ export class AuthError extends Error {
 	}
 }
 
-// ---------------------------------------------------------------- slack client
+function checkAuth(res) {
+	if (res?.ok === false && AUTH_ERRORS.has(res.error)) {
+		throw new AuthError(res.error);
+	}
+}
+
+// ---------------------------------------------------------------- clients
 
 export class SlackClient {
 	#token;
@@ -131,6 +209,8 @@ export class SlackClient {
 				continue;
 			}
 
+			// Slack reports rate limiting two ways: 429 with Retry-After, and
+			// HTTP 200 with `{ok:false, error:"ratelimited"}` plus Retry-After.
 			const isRateLimited =
 				res.status === 429 ||
 				(lastBody?.ok === false && lastBody.error === "ratelimited");
@@ -150,89 +230,116 @@ export class SlackClient {
 	}
 }
 
-function checkAuth(res) {
-	if (res?.ok === false && AUTH_ERRORS.has(res.error)) {
-		throw new AuthError(res.error);
+export class CacheClient {
+	#base;
+	#token;
+	#fetch;
+	#headers;
+	#enabled;
+
+	constructor({ env = process.env, fetch = globalThis.fetch } = {}) {
+		const rawBase = env.ACTIONS_CACHE_URL || "";
+		this.#base = rawBase.endsWith("/") ? rawBase : rawBase ? `${rawBase}/` : "";
+		this.#token = env.ACTIONS_RUNTIME_TOKEN || "";
+		this.#fetch = fetch;
+		this.#headers = {
+			Authorization: `Bearer ${this.#token}`,
+			Accept: "application/json;api-version=6.0-preview.1",
+		};
+		this.#enabled = !!this.#base && !!this.#token;
+	}
+
+	#url(path) {
+		return new URL(`_apis/artifactcache/${path}`, this.#base);
+	}
+
+	#send(path, init = {}) {
+		return this.#fetch(this.#url(path), {
+			...init,
+			headers: { ...this.#headers, ...(init.headers || {}) },
+		});
+	}
+
+	async restore() {
+		if (!this.#enabled) return null;
+		try {
+			const lookup = this.#url("cache");
+			// Sentinel primary key never matches; the second key is a prefix lookup
+			// against every entry we've saved, returning the most recent one.
+			lookup.searchParams.set(
+				"keys",
+				`${CACHE_KEY_PREFIX}__sentinel__,${CACHE_KEY_PREFIX}`,
+			);
+			lookup.searchParams.set("version", CACHE_VERSION);
+			const res = await this.#fetch(lookup, { headers: this.#headers });
+			if (res.status === 204) return null;
+			if (!res.ok) {
+				console.warn(`cache restore lookup status ${res.status}`);
+				return null;
+			}
+			const meta = await res.json();
+			if (!meta?.archiveLocation) return null;
+			const blob = await this.#fetch(meta.archiveLocation);
+			if (!blob.ok) {
+				console.warn(`cache blob fetch status ${blob.status}`);
+				return null;
+			}
+			return await blob.json();
+		} catch (e) {
+			console.warn(`cache restore failed: ${e.message}`);
+			return null;
+		}
+	}
+
+	async save(state, key) {
+		if (!this.#enabled) return;
+		try {
+			const body = Buffer.from(JSON.stringify(state), "utf8");
+
+			const reserveRes = await this.#send("caches", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					key,
+					version: CACHE_VERSION,
+					cacheSize: body.length,
+				}),
+			});
+			if (!reserveRes.ok) {
+				console.warn(`cache reserve status ${reserveRes.status}`);
+				return;
+			}
+			const cacheId = (await reserveRes.json())?.cacheId;
+			if (!cacheId) return;
+
+			const uploadRes = await this.#send(`caches/${cacheId}`, {
+				method: "PATCH",
+				headers: {
+					"Content-Type": "application/octet-stream",
+					"Content-Range": `bytes 0-${body.length - 1}/*`,
+				},
+				body,
+			});
+			if (!uploadRes.ok) {
+				console.warn(`cache upload status ${uploadRes.status}`);
+				return;
+			}
+
+			const commitRes = await this.#send(`caches/${cacheId}`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ size: body.length }),
+			});
+			if (!commitRes.ok) {
+				console.warn(`cache commit status ${commitRes.status}`);
+			}
+		} catch (e) {
+			console.warn(`cache save failed: ${e.message}`);
+		}
 	}
 }
 
-// ---------------------------------------------------------------- url match
-
-export function tokenizeAngles(text) {
-	const out = [];
-	let i = 0;
-	while (i < text.length) {
-		const lt = text.indexOf("<", i);
-		if (lt < 0) break;
-		const gt = text.indexOf(">", lt + 1);
-		if (gt < 0) break;
-		let cand = text.slice(lt + 1, gt);
-		const pipe = cand.indexOf("|");
-		if (pipe >= 0) cand = cand.slice(0, pipe);
-		out.push(cand);
-		i = gt + 1;
-	}
-	return out;
-}
-
-function walkForUrls(node) {
-	if (!node || typeof node !== "object") return [];
-	const here = typeof node.url === "string" ? [node.url] : [];
-	return here.concat(...Object.values(node).map(walkForUrls));
-}
-
-export function urlsFromMessage(message) {
-	const fromText =
-		typeof message.text === "string" ? tokenizeAngles(message.text) : [];
-	const fromAttachments = (message.attachments || []).flatMap((a) =>
-		[a.title_link, a.from_url].filter((s) => typeof s === "string"),
-	);
-	const fromBlocks = (message.blocks || []).flatMap(walkForUrls);
-	return [...fromText, ...fromAttachments, ...fromBlocks];
-}
-
-export function matchesPullUrl(candidate, owner, repo, num) {
-	if (!URL.canParse(candidate)) return false;
-	const u = new URL(candidate);
-	if (u.host !== "github.com") return false;
-	const parts = u.pathname.split("/");
-	return (
-		parts.length === 5 &&
-		parts[0] === "" &&
-		parts[1] === owner &&
-		parts[2] === repo &&
-		parts[3] === "pull" &&
-		parts[4] === String(num)
-	);
-}
-
-// ---------------------------------------------------------------- event → status
-
-export function deriveStatus(eventName, payload) {
-	if (eventName === "pull_request_review") {
-		if (payload.action !== "submitted") return null;
-		const state = payload.review?.state;
-		if (state === "approved") return STATUS_APPROVED;
-		if (state === "changes_requested") return STATUS_CHANGES_REQUESTED;
-		return null;
-	}
-	if (eventName === "pull_request") {
-		if (payload.action !== "closed") return null;
-		return payload.pull_request?.merged ? STATUS_MERGED : STATUS_CLOSED;
-	}
-	return null;
-}
-
-export function prContext(payload) {
-	const pr = payload.pull_request;
-	const owner = pr?.base?.repo?.owner?.login;
-	const repo = pr?.base?.repo?.name;
-	const num = pr?.number;
-	if (!owner || !repo || !Number.isFinite(num)) return null;
-	return { owner, repo, num, prUrl: pr.html_url };
-}
-
-// ---------------------------------------------------------------- discovery
+// ---------------------------------------------------------------- state + slack ops
 
 export async function ensureBotUserId(state, slack) {
 	if (state.botUserId) return state.botUserId;
@@ -318,12 +425,13 @@ export async function discoverMatches(channels, owner, repo, num, slack) {
 	return matches;
 }
 
-// ---------------------------------------------------------------- reactions
-
 export async function reactToMatch(match, ctx) {
 	const { emoji, oppositeEmoji, botUserId, isRerun, slack } = ctx;
 	const where = `${match.channel}/${match.ts}`;
 
+	// Approved↔changes-requested is the only flippable pair. When applying
+	// one, remove the other only if our own bot added it (never anyone else's).
+	// Skipped on re-runs so a stale replay can't reverse a real later state.
 	if (!isRerun && oppositeEmoji) {
 		const got = await slack.call("reactions.get", {
 			channel: match.channel,
@@ -365,116 +473,6 @@ export async function reactToMatch(match, ctx) {
 	return { ok: !!add.ok, error: add.error };
 }
 
-// ---------------------------------------------------------------- cache (GHA v1 API)
-
-export class CacheClient {
-	#base;
-	#token;
-	#fetch;
-	#headers;
-	#enabled;
-
-	constructor({ env = process.env, fetch = globalThis.fetch } = {}) {
-		const rawBase = env.ACTIONS_CACHE_URL || "";
-		this.#base = rawBase.endsWith("/") ? rawBase : rawBase ? `${rawBase}/` : "";
-		this.#token = env.ACTIONS_RUNTIME_TOKEN || "";
-		this.#fetch = fetch;
-		this.#headers = {
-			Authorization: `Bearer ${this.#token}`,
-			Accept: "application/json;api-version=6.0-preview.1",
-		};
-		this.#enabled = !!this.#base && !!this.#token;
-	}
-
-	#url(path) {
-		return new URL(`_apis/artifactcache/${path}`, this.#base);
-	}
-
-	#send(path, init = {}) {
-		return this.#fetch(this.#url(path), {
-			...init,
-			headers: { ...this.#headers, ...(init.headers || {}) },
-		});
-	}
-
-	async restore() {
-		if (!this.#enabled) return null;
-		try {
-			const lookup = this.#url("cache");
-			// Primary key won't match anything we ever save; second is the prefix.
-			lookup.searchParams.set(
-				"keys",
-				`${CACHE_KEY_PREFIX}__sentinel__,${CACHE_KEY_PREFIX}`,
-			);
-			lookup.searchParams.set("version", CACHE_VERSION);
-			const res = await this.#fetch(lookup, { headers: this.#headers });
-			if (res.status === 204) return null;
-			if (!res.ok) {
-				console.warn(`cache restore lookup status ${res.status}`);
-				return null;
-			}
-			const meta = await res.json();
-			if (!meta?.archiveLocation) return null;
-			const blob = await this.#fetch(meta.archiveLocation);
-			if (!blob.ok) {
-				console.warn(`cache blob fetch status ${blob.status}`);
-				return null;
-			}
-			return await blob.json();
-		} catch (e) {
-			console.warn(`cache restore failed: ${e.message}`);
-			return null;
-		}
-	}
-
-	async save(state, key) {
-		if (!this.#enabled) return;
-		try {
-			const body = Buffer.from(JSON.stringify(state), "utf8");
-
-			const reserveRes = await this.#send("caches", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					key,
-					version: CACHE_VERSION,
-					cacheSize: body.length,
-				}),
-			});
-			if (!reserveRes.ok) {
-				console.warn(`cache reserve status ${reserveRes.status}`);
-				return;
-			}
-			const cacheId = (await reserveRes.json())?.cacheId;
-			if (!cacheId) return;
-
-			const uploadRes = await this.#send(`caches/${cacheId}`, {
-				method: "PATCH",
-				headers: {
-					"Content-Type": "application/octet-stream",
-					"Content-Range": `bytes 0-${body.length - 1}/*`,
-				},
-				body,
-			});
-			if (!uploadRes.ok) {
-				console.warn(`cache upload status ${uploadRes.status}`);
-				return;
-			}
-
-			const commitRes = await this.#send(`caches/${cacheId}`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ size: body.length }),
-			});
-			if (!commitRes.ok) {
-				console.warn(`cache commit status ${commitRes.status}`);
-			}
-		} catch (e) {
-			console.warn(`cache save failed: ${e.message}`);
-		}
-	}
-}
-
 // ---------------------------------------------------------------- main
 
 async function main() {
@@ -502,7 +500,7 @@ async function main() {
 
 	const token = input("slack-token").trim();
 	if (!token) {
-		// Fork PRs run with empty secrets by design; that's not a configuration error.
+		// Fork PRs run with empty secrets by design — that's not a misconfig.
 		if (payload.pull_request?.head?.repo?.fork) return;
 		console.error("slack-token is missing; set the SLACK_TOKEN secret");
 		return;
@@ -549,8 +547,8 @@ async function main() {
 		reactCtx.botUserId = await ensureBotUserId(state, slack);
 	}
 
-	// Split matches into the portion we'll react to this run + the overflow
-	// that gets carried forward in the cache so the next run picks it up.
+	// React to as many matches as the per-run cap allows; carry the rest over
+	// in the cache so the next event for this PR picks them up.
 	const toReact = matches.slice(0, REACTIONS_PER_RUN_CAP);
 	const overflow = matches.slice(REACTIONS_PER_RUN_CAP);
 	if (overflow.length) {
@@ -566,8 +564,8 @@ async function main() {
 		...overflow,
 	];
 
-	// Update prMatches: terminal events delete the entry; otherwise rewrite
-	// with bumped lastTouched (so the entry doesn't age out for active PRs).
+	// Terminal events delete the entry; otherwise rewrite with bumped
+	// lastTouched so active PRs don't age out of the 90-day stale sweep.
 	const isTerminal = status === STATUS_MERGED || status === STATUS_CLOSED;
 	const { [prKey]: _evicted, ...rest } = state.prMatches;
 	state.prMatches =
@@ -588,9 +586,11 @@ async function main() {
 
 if (import.meta.main) {
 	main().catch((e) => {
+		// AuthError → exit 0 with operator-facing message; everything else
+		// → exit 1 with a stack trace.
 		if (e instanceof AuthError) {
 			console.error(e.message);
-			return; // exit 0 — the operator just needs to refresh the token.
+			return;
 		}
 		console.error(e?.stack || String(e));
 		process.exit(1);
