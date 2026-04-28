@@ -593,13 +593,4 @@ async function main() {
 	await cache.save(state, `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`);
 }
 
-if (import.meta.main) {
-	main().catch((e) => {
-		// AuthError is operator-facing: print just the message, no stack.
-		// Everything else propagates to Node's default unhandled-rejection
-		// handler (which prints the stack and exits non-zero).
-		if (!(e instanceof AuthError)) throw e;
-		console.error(e.message);
-		process.exit(1);
-	});
-}
+if (import.meta.main) main();
