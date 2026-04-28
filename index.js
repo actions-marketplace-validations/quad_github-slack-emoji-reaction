@@ -66,58 +66,61 @@ class AuthError extends Error {
 
 // ---------------------------------------------------------------- slack client
 
-const slackClient = {
-	lastCallAt: 0,
-	fetch: null, // overridden in tests
-	paceMs: null, // overridden in tests
-};
+export function createSlackClient({
+	token,
+	fetch = globalThis.fetch,
+	paceMs = SLACK_PACE_MS,
+} = {}) {
+	let lastCallAt = 0;
 
-async function slackCall(method, params, token) {
-	const url = SLACK_API + method;
-	const paceMs = slackClient.paceMs ?? SLACK_PACE_MS;
-	const fetchImpl = slackClient.fetch ?? globalThis.fetch;
-	let lastBody;
-	for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-		const wait = paceMs - (Date.now() - slackClient.lastCallAt);
-		if (wait > 0) await sleep(wait);
-		slackClient.lastCallAt = Date.now();
+	async function call(method, params) {
+		const url = SLACK_API + method;
+		let lastBody;
+		for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+			const wait = paceMs - (Date.now() - lastCallAt);
+			if (wait > 0) await sleep(wait);
+			lastCallAt = Date.now();
 
-		let res;
-		try {
-			res = await fetchImpl(url, {
-				method: "POST",
-				headers: {
-					Authorization: `Bearer ${token}`,
-					"Content-Type": "application/json; charset=utf-8",
-				},
-				body: JSON.stringify(params || {}),
-			});
-			lastBody = await res.json();
-		} catch (e) {
-			warn(
-				`slack ${method} network error: ${e.message} (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
+			let res;
+			try {
+				res = await fetch(url, {
+					method: "POST",
+					headers: {
+						Authorization: `Bearer ${token}`,
+						"Content-Type": "application/json; charset=utf-8",
+					},
+					body: JSON.stringify(params || {}),
+				});
+				lastBody = await res.json();
+			} catch (e) {
+				warn(
+					`slack ${method} network error: ${e.message} (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
+				);
+				if (attempt >= MAX_RETRIES)
+					return { ok: false, error: "network_error" };
+				await sleep(1000);
+				continue;
+			}
+
+			const isRateLimited =
+				res.status === 429 ||
+				(lastBody?.ok === false && lastBody.error === "ratelimited");
+			if (!isRateLimited) return lastBody;
+
+			const retry = Math.min(
+				parseInt(res.headers.get("retry-after"), 10) || 1,
+				RETRY_AFTER_CAP_S,
 			);
-			if (attempt >= MAX_RETRIES) return { ok: false, error: "network_error" };
-			await sleep(1000);
-			continue;
+			log(
+				`slack ${method} ratelimited; retry-after ${retry}s (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
+			);
+			if (attempt >= MAX_RETRIES) break;
+			await sleep(retry * 1000);
 		}
-
-		const isRateLimited =
-			res.status === 429 ||
-			(lastBody?.ok === false && lastBody.error === "ratelimited");
-		if (!isRateLimited) return lastBody;
-
-		const retry = Math.min(
-			parseInt(res.headers.get("retry-after"), 10) || 1,
-			RETRY_AFTER_CAP_S,
-		);
-		log(
-			`slack ${method} ratelimited; retry-after ${retry}s (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
-		);
-		if (attempt >= MAX_RETRIES) break;
-		await sleep(retry * 1000);
+		return lastBody ?? { ok: false, error: "ratelimited" };
 	}
-	return lastBody ?? { ok: false, error: "ratelimited" };
+
+	return { call };
 }
 
 function checkAuth(res) {
@@ -211,9 +214,9 @@ function prContext(payload) {
 
 // ---------------------------------------------------------------- discovery
 
-async function ensureBotUserId(state, token) {
+export async function ensureBotUserId(state, slack) {
 	if (state.botUserId) return state.botUserId;
-	const res = await slackCall("auth.test", {}, token);
+	const res = await slack.call("auth.test", {});
 	checkAuth(res);
 	if (!res.ok) throw new Error(`auth.test failed: ${res.error}`);
 	state.botUserId = res.user_id;
@@ -221,7 +224,7 @@ async function ensureBotUserId(state, token) {
 	return state.botUserId;
 }
 
-async function ensureChannels(state, token) {
+export async function ensureChannels(state, slack) {
 	const fresh =
 		state.channels &&
 		state.channelsRefreshedAt &&
@@ -237,7 +240,7 @@ async function ensureChannels(state, token) {
 			limit: 200,
 		};
 		if (cursor) params.cursor = cursor;
-		const res = await slackCall("conversations.list", params, token);
+		const res = await slack.call("conversations.list", params);
 		checkAuth(res);
 		if (!res.ok) throw new Error(`conversations.list failed: ${res.error}`);
 		for (const c of res.channels || []) {
@@ -252,7 +255,7 @@ async function ensureChannels(state, token) {
 	return channels;
 }
 
-async function discoverMatches(channels, owner, repo, num, token) {
+export async function discoverMatches(channels, owner, repo, num, slack) {
 	const matches = [];
 	const oldest = String(nowS() - HISTORY_LOOKBACK_S);
 	let scanned = 0;
@@ -273,7 +276,7 @@ async function discoverMatches(channels, owner, repo, num, token) {
 		) {
 			const params = { channel: ch.id, oldest, limit: 200 };
 			if (cursor) params.cursor = cursor;
-			const res = await slackCall("conversations.history", params, token);
+			const res = await slack.call("conversations.history", params);
 			checkAuth(res);
 			if (!res.ok) {
 				warn(`conversations.history ${ch.id}(${ch.name}): ${res.error}`);
@@ -298,27 +301,27 @@ async function discoverMatches(channels, owner, repo, num, token) {
 
 // ---------------------------------------------------------------- reactions
 
-async function reactToMatch(match, ctx) {
-	const { status, emoji, oppositeEmoji, botUserId, isRerun, token } = ctx;
+export async function reactToMatch(match, ctx) {
+	const { status, emoji, oppositeEmoji, botUserId, isRerun, slack } = ctx;
 	const where = `${match.channel}/${match.ts}`;
 
 	if (!isRerun && oppositeEmoji) {
-		const got = await slackCall(
-			"reactions.get",
-			{ channel: match.channel, timestamp: match.ts, full: true },
-			token,
-		);
+		const got = await slack.call("reactions.get", {
+			channel: match.channel,
+			timestamp: match.ts,
+			full: true,
+		});
 		checkAuth(got);
 		if (got.ok) {
 			const opp = (got.message?.reactions || []).find(
 				(r) => r.name === oppositeEmoji,
 			);
 			if (opp?.users?.includes(botUserId)) {
-				const rm = await slackCall(
-					"reactions.remove",
-					{ channel: match.channel, timestamp: match.ts, name: oppositeEmoji },
-					token,
-				);
+				const rm = await slack.call("reactions.remove", {
+					channel: match.channel,
+					timestamp: match.ts,
+					name: oppositeEmoji,
+				});
 				checkAuth(rm);
 				log(
 					JSON.stringify({
@@ -336,11 +339,11 @@ async function reactToMatch(match, ctx) {
 		}
 	}
 
-	const add = await slackCall(
-		"reactions.add",
-		{ channel: match.channel, timestamp: match.ts, name: emoji },
-		token,
-	);
+	const add = await slack.call("reactions.add", {
+		channel: match.channel,
+		timestamp: match.ts,
+		name: emoji,
+	});
 	checkAuth(add);
 	log(
 		JSON.stringify({
@@ -470,6 +473,7 @@ async function main() {
 		return;
 	}
 	console.log(`::add-mask::${token}`);
+	const slack = createSlackClient({ token });
 
 	const eventPath = process.env.GITHUB_EVENT_PATH;
 	const eventName = process.env.GITHUB_EVENT_NAME;
@@ -530,8 +534,8 @@ async function main() {
 			matches = cached;
 			log(`cache hit for ${prKey}: ${matches.length} match(es)`);
 		} else {
-			await ensureBotUserId(state, token);
-			const channels = await ensureChannels(state, token);
+			await ensureBotUserId(state, slack);
+			const channels = await ensureChannels(state, slack);
 			log(
 				`scanning ${Math.min(channels.length, MAX_CHANNELS_PER_RUN)} channel(s) for ${prCtx.prUrl}`,
 			);
@@ -540,7 +544,7 @@ async function main() {
 				prCtx.owner,
 				prCtx.repo,
 				prCtx.num,
-				token,
+				slack,
 			);
 			log(`discovery: ${matches.length} match(es) for ${prKey}`);
 			dirty = true;
@@ -552,12 +556,12 @@ async function main() {
 			oppositeEmoji,
 			botUserId: state.botUserId,
 			isRerun,
-			token,
+			slack,
 		};
 		const needsBotIdForFlip =
 			oppositeEmoji && !isRerun && matches.length && !reactCtx.botUserId;
 		if (needsBotIdForFlip) {
-			reactCtx.botUserId = await ensureBotUserId(state, token);
+			reactCtx.botUserId = await ensureBotUserId(state, slack);
 			dirty = true;
 		}
 
@@ -621,8 +625,6 @@ async function main() {
 	await cacheSave(state, `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`);
 }
 
-// Network calls and module-state mutators live behind `_test` so the
-// public surface stays just the pure helpers + AuthError.
 export {
 	AuthError,
 	deriveStatus,
@@ -630,25 +632,6 @@ export {
 	prContext,
 	tokenizeAngles,
 	urlsFromMessage,
-};
-
-export const _test = {
-	slackCall,
-	ensureBotUserId,
-	ensureChannels,
-	discoverMatches,
-	reactToMatch,
-	setFetch(fn) {
-		slackClient.fetch = fn;
-	},
-	setPaceMs(ms) {
-		slackClient.paceMs = ms;
-	},
-	reset() {
-		slackClient.lastCallAt = 0;
-		slackClient.fetch = null;
-		slackClient.paceMs = null;
-	},
 };
 
 if (import.meta.main) {

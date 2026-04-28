@@ -4,22 +4,18 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-	_test,
 	AuthError,
+	createSlackClient,
 	deriveStatus,
+	discoverMatches,
+	ensureBotUserId,
+	ensureChannels,
 	matchesPullUrl,
 	prContext,
+	reactToMatch,
 	tokenizeAngles,
 	urlsFromMessage,
 } from "./index.js";
-
-const {
-	slackCall,
-	ensureBotUserId,
-	ensureChannels,
-	discoverMatches,
-	reactToMatch,
-} = _test;
 
 // ============================================================ static helpers
 
@@ -311,7 +307,13 @@ function shimFetch(scripts) {
 	return { impl, calls };
 }
 
-test.beforeEach(() => _test.reset());
+// Each test builds its own slack client over a scripted fetch shim — no
+// shared module state to reset between tests.
+const slackFor = (scripts) => {
+	const { impl, calls } = shimFetch(scripts);
+	const slack = createSlackClient({ token: "xoxb", fetch: impl, paceMs: 0 });
+	return { slack, calls };
+};
 
 const ctx = (overrides) => ({
 	status: "merged",
@@ -319,25 +321,21 @@ const ctx = (overrides) => ({
 	oppositeEmoji: null,
 	botUserId: null,
 	isRerun: false,
-	token: "xoxb",
 	...overrides,
 });
 
 // ---------------------------------------------------------------- slackCall
 
-test("slackCall: returns body verbatim on success", async () => {
-	_test.setPaceMs(0);
-	const { impl } = shimFetch({
+test("slack.call: returns body verbatim on success", async () => {
+	const { slack } = slackFor({
 		"auth.test": [{ body: { ok: true, user_id: "U0BOT" } }],
 	});
-	_test.setFetch(impl);
-	const res = await slackCall("auth.test", {}, "xoxb-fake");
+	const res = await slack.call("auth.test", {});
 	assert.deepEqual(res, { ok: true, user_id: "U0BOT" });
 });
 
-test("slackCall: 429 with Retry-After triggers a sleep+retry, then succeeds", async () => {
-	_test.setPaceMs(0);
-	const { impl, calls } = shimFetch({
+test("slack.call: 429 with Retry-After triggers a sleep+retry, then succeeds", async () => {
+	const { slack, calls } = slackFor({
 		"auth.test": [
 			{
 				status: 429,
@@ -347,9 +345,8 @@ test("slackCall: 429 with Retry-After triggers a sleep+retry, then succeeds", as
 			{ body: { ok: true, user_id: "U0BOT" } },
 		],
 	});
-	_test.setFetch(impl);
 	const t0 = Date.now();
-	const res = await slackCall("auth.test", {}, "xoxb-fake");
+	const res = await slack.call("auth.test", {});
 	const elapsed = Date.now() - t0;
 	assert.equal(res.ok, true);
 	assert.equal(calls.length, 2);
@@ -359,9 +356,8 @@ test("slackCall: 429 with Retry-After triggers a sleep+retry, then succeeds", as
 	);
 });
 
-test("slackCall: 200 + ok:false + error=ratelimited is treated as rate-limit (Slack quirk)", async () => {
-	_test.setPaceMs(0);
-	const { impl, calls } = shimFetch({
+test("slack.call: 200 + ok:false + error=ratelimited is treated as rate-limit (Slack quirk)", async () => {
+	const { slack, calls } = slackFor({
 		"conversations.history": [
 			{
 				status: 200,
@@ -371,46 +367,37 @@ test("slackCall: 200 + ok:false + error=ratelimited is treated as rate-limit (Sl
 			{ body: { ok: true, messages: [] } },
 		],
 	});
-	_test.setFetch(impl);
-	const res = await slackCall(
-		"conversations.history",
-		{ channel: "C1" },
-		"xoxb",
-	);
+	const res = await slack.call("conversations.history", { channel: "C1" });
 	assert.equal(res.ok, true);
 	assert.equal(calls.length, 2);
 });
 
-test("slackCall: gives up after 3 retries and returns the last 429 body", async () => {
-	_test.setPaceMs(0);
+test("slack.call: gives up after 3 retries and returns the last 429 body", async () => {
 	const ratelimited = {
 		status: 429,
 		headers: { "retry-after": "1" },
 		body: { ok: false, error: "ratelimited" },
 	};
-	const { impl, calls } = shimFetch({
-		"auth.test": [ratelimited, ratelimited, ratelimited, ratelimited], // 1 + 3 retries
+	const { slack, calls } = slackFor({
+		"auth.test": [ratelimited, ratelimited, ratelimited, ratelimited],
 	});
-	_test.setFetch(impl);
-	const res = await slackCall("auth.test", {}, "xoxb");
+	const res = await slack.call("auth.test", {});
 	assert.equal(res.ok, false);
 	assert.equal(res.error, "ratelimited");
 	assert.equal(calls.length, 4);
 });
 
-test("slackCall: non-rate-limit errors are returned without retry", async () => {
-	_test.setPaceMs(0);
-	const { impl, calls } = shimFetch({
+test("slack.call: non-rate-limit errors are returned without retry", async () => {
+	const { slack, calls } = slackFor({
 		"reactions.add": [
 			{ status: 200, body: { ok: false, error: "already_reacted" } },
 		],
 	});
-	_test.setFetch(impl);
-	const res = await slackCall(
-		"reactions.add",
-		{ channel: "C1", timestamp: "1.0", name: "eyes" },
-		"xoxb",
-	);
+	const res = await slack.call("reactions.add", {
+		channel: "C1",
+		timestamp: "1.0",
+		name: "eyes",
+	});
 	assert.equal(res.error, "already_reacted");
 	assert.equal(calls.length, 1);
 });
@@ -418,8 +405,7 @@ test("slackCall: non-rate-limit errors are returned without retry", async () => 
 // ---------------------------------------------------------------- ensureChannels
 
 test("ensureChannels: paginates conversations.list and filters to is_member", async () => {
-	_test.setPaceMs(0);
-	const { impl, calls } = shimFetch({
+	const { slack, calls } = slackFor({
 		"conversations.list": [
 			{
 				body: {
@@ -443,9 +429,8 @@ test("ensureChannels: paginates conversations.list and filters to is_member", as
 			},
 		],
 	});
-	_test.setFetch(impl);
 	const state = {};
-	const channels = await ensureChannels(state, "xoxb");
+	const channels = await ensureChannels(state, slack);
 	assert.deepEqual(
 		channels.map((c) => c.id),
 		["C1", "C3"],
@@ -455,28 +440,25 @@ test("ensureChannels: paginates conversations.list and filters to is_member", as
 });
 
 test("ensureChannels: returns cached list when within TTL", async () => {
-	_test.setPaceMs(0);
-	const { impl, calls } = shimFetch({ "conversations.list": [] });
-	_test.setFetch(impl);
+	const { slack, calls } = slackFor({ "conversations.list": [] });
 	const state = {
 		channels: [{ id: "C1", name: "general" }],
-		channelsRefreshedAt: Math.floor(Date.now() / 1000) - 60, // 1 min ago, well under 24h TTL
+		channelsRefreshedAt: Math.floor(Date.now() / 1000) - 60,
 	};
-	const channels = await ensureChannels(state, "xoxb");
+	const channels = await ensureChannels(state, slack);
 	assert.equal(channels.length, 1);
-	assert.equal(calls.length, 0); // no API call
+	assert.equal(calls.length, 0);
 });
 
 // ---------------------------------------------------------------- discoverMatches
 
 test("discoverMatches: scans history of every member channel for the PR URL", async () => {
-	_test.setPaceMs(0);
 	const matchingMsg = {
 		ts: "1.001",
 		text: "see <https://github.com/octo/hello/pull/42>",
 	};
 	const noisyMsg = { ts: "1.002", text: "unrelated chat" };
-	const { impl, calls } = shimFetch({
+	const { slack, calls } = slackFor({
 		"conversations.history": [
 			{
 				body: { ok: true, messages: [matchingMsg, noisyMsg], has_more: false },
@@ -484,36 +466,31 @@ test("discoverMatches: scans history of every member channel for the PR URL", as
 			{ body: { ok: true, messages: [noisyMsg], has_more: false } },
 		],
 	});
-	_test.setFetch(impl);
 	const channels = [
 		{ id: "C1", name: "a" },
 		{ id: "C2", name: "b" },
 	];
-	const matches = await discoverMatches(channels, "octo", "hello", 42, "xoxb");
+	const matches = await discoverMatches(channels, "octo", "hello", 42, slack);
 	assert.deepEqual(matches, [{ channel: "C1", ts: "1.001" }]);
 	assert.equal(calls.length, 2);
-	// Confirms the 30-day oldest filter is sent.
 	assert.ok(parseInt(calls[0].params.oldest, 10) > 0);
 });
 
 test("discoverMatches: respects 100-channel cap", async () => {
-	_test.setPaceMs(0);
 	const channels = Array.from({ length: 150 }, (_, i) => ({
 		id: `C${i}`,
 		name: `c${i}`,
 	}));
-	const { impl, calls } = shimFetch({
+	const { slack, calls } = slackFor({
 		"conversations.history": Array.from({ length: 100 }, () => ({
 			body: { ok: true, messages: [], has_more: false },
 		})),
 	});
-	_test.setFetch(impl);
-	await discoverMatches(channels, "o", "r", 1, "xoxb");
-	assert.equal(calls.length, 100); // not 150
+	await discoverMatches(channels, "o", "r", 1, slack);
+	assert.equal(calls.length, 100);
 });
 
 test("discoverMatches: paginates conversations.history up to 3 pages, then stops", async () => {
-	_test.setPaceMs(0);
 	const page = (cursor, has_more) => ({
 		body: {
 			ok: true,
@@ -522,21 +499,19 @@ test("discoverMatches: paginates conversations.history up to 3 pages, then stops
 			response_metadata: { next_cursor: cursor },
 		},
 	});
-	const { impl, calls } = shimFetch({
+	const { slack, calls } = slackFor({
 		"conversations.history": [
 			page("p2", true),
 			page("p3", true),
-			page("p4", true), // would continue past 3 pages, but cap stops us
-			page("", false), // not used
+			page("p4", true),
+			page("", false),
 		],
 	});
-	_test.setFetch(impl);
-	await discoverMatches([{ id: "C1", name: "x" }], "o", "r", 1, "xoxb");
+	await discoverMatches([{ id: "C1", name: "x" }], "o", "r", 1, slack);
 	assert.equal(calls.length, 3);
 });
 
 test("discoverMatches: extracts PR URL from blocks even when text is empty", async () => {
-	_test.setPaceMs(0);
 	const msg = {
 		ts: "1.5",
 		blocks: [
@@ -553,18 +528,17 @@ test("discoverMatches: extracts PR URL from blocks even when text is empty", asy
 			},
 		],
 	};
-	const { impl } = shimFetch({
+	const { slack } = slackFor({
 		"conversations.history": [
 			{ body: { ok: true, messages: [msg], has_more: false } },
 		],
 	});
-	_test.setFetch(impl);
 	const matches = await discoverMatches(
 		[{ id: "C1", name: "x" }],
 		"octo",
 		"hello",
 		42,
-		"xoxb",
+		slack,
 	);
 	assert.deepEqual(matches, [{ channel: "C1", ts: "1.5" }]);
 });
@@ -572,26 +546,22 @@ test("discoverMatches: extracts PR URL from blocks even when text is empty", asy
 // ---------------------------------------------------------------- ensureBotUserId / auth errors
 
 test("ensureBotUserId: caches the bot user id and skips auth.test on second call", async () => {
-	_test.setPaceMs(0);
-	const { impl, calls } = shimFetch({
+	const { slack, calls } = slackFor({
 		"auth.test": [{ body: { ok: true, user_id: "U0BOT" } }],
 	});
-	_test.setFetch(impl);
 	const state = {};
-	await ensureBotUserId(state, "xoxb");
-	await ensureBotUserId(state, "xoxb");
+	await ensureBotUserId(state, slack);
+	await ensureBotUserId(state, slack);
 	assert.equal(state.botUserId, "U0BOT");
 	assert.equal(calls.length, 1);
 });
 
 test("ensureBotUserId: throws AuthError on invalid_auth (so caller can clean-exit)", async () => {
-	_test.setPaceMs(0);
-	const { impl } = shimFetch({
+	const { slack } = slackFor({
 		"auth.test": [{ body: { ok: false, error: "invalid_auth" } }],
 	});
-	_test.setFetch(impl);
 	await assert.rejects(
-		ensureBotUserId({}, "xoxb-bad"),
+		ensureBotUserId({}, slack),
 		(e) => e instanceof AuthError && e.code === "invalid_auth",
 	);
 });
@@ -599,8 +569,7 @@ test("ensureBotUserId: throws AuthError on invalid_auth (so caller can clean-exi
 // ---------------------------------------------------------------- reactToMatch (flip cleanup)
 
 test("reactToMatch: approved with our bot owning a stale changes-requested removes the warning, then adds approved", async () => {
-	_test.setPaceMs(0);
-	const { impl, calls } = shimFetch({
+	const { slack, calls } = slackFor({
 		"reactions.get": [
 			{
 				body: {
@@ -616,10 +585,10 @@ test("reactToMatch: approved with our bot owning a stale changes-requested remov
 		"reactions.remove": [{ body: { ok: true } }],
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	_test.setFetch(impl);
 	const result = await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
 		ctx({
+			slack,
 			status: "approved",
 			emoji: "white_check_mark",
 			oppositeEmoji: "warning",
@@ -634,8 +603,7 @@ test("reactToMatch: approved with our bot owning a stale changes-requested remov
 });
 
 test("reactToMatch: approved without our bot in the warning users array does NOT remove someone else’s warning", async () => {
-	_test.setPaceMs(0);
-	const { impl, calls } = shimFetch({
+	const { slack, calls } = slackFor({
 		"reactions.get": [
 			{
 				body: {
@@ -648,10 +616,10 @@ test("reactToMatch: approved without our bot in the warning users array does NOT
 		],
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	_test.setFetch(impl);
 	await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
 		ctx({
+			slack,
 			status: "approved",
 			emoji: "white_check_mark",
 			oppositeEmoji: "warning",
@@ -666,14 +634,13 @@ test("reactToMatch: approved without our bot in the warning users array does NOT
 });
 
 test("reactToMatch: when isRerun=true, skips the entire flip-cleanup branch (re-run safety)", async () => {
-	_test.setPaceMs(0);
-	const { impl, calls } = shimFetch({
+	const { slack, calls } = slackFor({
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	_test.setFetch(impl);
 	await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
 		ctx({
+			slack,
 			status: "approved",
 			emoji: "white_check_mark",
 			oppositeEmoji: "warning",
@@ -689,40 +656,34 @@ test("reactToMatch: when isRerun=true, skips the entire flip-cleanup branch (re-
 });
 
 test("reactToMatch: tolerated reaction errors (already_reacted) do not throw", async () => {
-	_test.setPaceMs(0);
-	const { impl } = shimFetch({
+	const { slack } = slackFor({
 		"reactions.add": [{ body: { ok: false, error: "already_reacted" } }],
 	});
-	_test.setFetch(impl);
 	// No oppositeEmoji passed so flip cleanup is skipped.
 	const result = await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
-		ctx({ emoji: "large_purple_square" }),
+		ctx({ slack, emoji: "large_purple_square" }),
 	);
 	assert.equal(result.error, "already_reacted");
 });
 
 test("reactToMatch: stale-match errors (channel_not_found) surface so caller can prune cache", async () => {
-	_test.setPaceMs(0);
-	const { impl } = shimFetch({
+	const { slack } = slackFor({
 		"reactions.add": [{ body: { ok: false, error: "channel_not_found" } }],
 	});
-	_test.setFetch(impl);
 	const result = await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
-		ctx({ emoji: "large_purple_square" }),
+		ctx({ slack, emoji: "large_purple_square" }),
 	);
 	assert.equal(result.error, "channel_not_found");
 });
 
 test("reactToMatch: invalid_auth on reactions.add propagates as AuthError", async () => {
-	_test.setPaceMs(0);
-	const { impl } = shimFetch({
+	const { slack } = slackFor({
 		"reactions.add": [{ body: { ok: false, error: "invalid_auth" } }],
 	});
-	_test.setFetch(impl);
 	await assert.rejects(
-		reactToMatch({ channel: "C1", ts: "1.0" }, ctx({})),
+		reactToMatch({ channel: "C1", ts: "1.0" }, ctx({ slack })),
 		(e) => e instanceof AuthError && e.code === "invalid_auth",
 	);
 });
