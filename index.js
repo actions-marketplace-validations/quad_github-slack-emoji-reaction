@@ -79,29 +79,53 @@ export class AuthError extends Error {
 	}
 }
 
+// Sentinel: thrown by `invariant` to short-circuit main(). The outer catch
+// turns this into a clean exit-0 — the level was already logged at the call site.
+class SkipRun extends Error {}
+
+// Three levels intentionally: routine "no work to do" skips stay quiet (log);
+// "operator probably needs to know" surfaces as a yellow annotation (warn);
+// "this should not happen / requires action" goes red (error).
+const invariant = (value, message, level = "log") => {
+	if (!value) {
+		console[level](message);
+		throw new SkipRun();
+	}
+	return value;
+};
+
 // ---------------------------------------------------------------- slack client
 
-export function createSlackClient({
-	token,
-	fetch = globalThis.fetch,
-	paceMs = SLACK_PACE_MS,
-} = {}) {
-	let lastCallAt = 0;
+export class SlackClient {
+	#token;
+	#fetch;
+	#paceMs;
+	#lastCallAt = 0;
 
-	async function call(method, params) {
+	constructor({
+		token,
+		fetch = globalThis.fetch,
+		paceMs = SLACK_PACE_MS,
+	} = {}) {
+		this.#token = token;
+		this.#fetch = fetch;
+		this.#paceMs = paceMs;
+	}
+
+	async call(method, params) {
 		const url = SLACK_API + method;
 		let lastBody;
 		for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-			const wait = paceMs - (Date.now() - lastCallAt);
+			const wait = this.#paceMs - (Date.now() - this.#lastCallAt);
 			if (wait > 0) await sleep(wait);
-			lastCallAt = Date.now();
+			this.#lastCallAt = Date.now();
 
 			let res;
 			try {
-				res = await fetch(url, {
+				res = await this.#fetch(url, {
 					method: "POST",
 					headers: {
-						Authorization: `Bearer ${token}`,
+						Authorization: `Bearer ${this.#token}`,
 						"Content-Type": "application/json; charset=utf-8",
 					},
 					body: JSON.stringify(params || {}),
@@ -134,8 +158,6 @@ export function createSlackClient({
 		}
 		return lastBody ?? { ok: false, error: "ratelimited" };
 	}
-
-	return { call };
 }
 
 function checkAuth(res) {
@@ -374,36 +396,47 @@ export async function reactToMatch(match, ctx) {
 
 // ---------------------------------------------------------------- cache (GHA v1 API)
 
-export function createCache({
-	env = process.env,
-	fetch = globalThis.fetch,
-} = {}) {
-	const rawBase = env.ACTIONS_CACHE_URL || "";
-	const base = rawBase.endsWith("/") ? rawBase : rawBase ? `${rawBase}/` : "";
-	const token = env.ACTIONS_RUNTIME_TOKEN || "";
-	const headers = {
-		Authorization: `Bearer ${token}`,
-		Accept: "application/json;api-version=6.0-preview.1",
-	};
-	const enabled = !!base && !!token;
-	const url = (path) => new URL(`_apis/artifactcache/${path}`, base);
-	const send = (path, init = {}) =>
-		fetch(url(path), {
-			...init,
-			headers: { ...headers, ...(init.headers || {}) },
-		});
+export class CacheClient {
+	#base;
+	#token;
+	#fetch;
+	#headers;
+	#enabled;
 
-	async function restore() {
-		if (!enabled) return null;
+	constructor({ env = process.env, fetch = globalThis.fetch } = {}) {
+		const rawBase = env.ACTIONS_CACHE_URL || "";
+		this.#base = rawBase.endsWith("/") ? rawBase : rawBase ? `${rawBase}/` : "";
+		this.#token = env.ACTIONS_RUNTIME_TOKEN || "";
+		this.#fetch = fetch;
+		this.#headers = {
+			Authorization: `Bearer ${this.#token}`,
+			Accept: "application/json;api-version=6.0-preview.1",
+		};
+		this.#enabled = !!this.#base && !!this.#token;
+	}
+
+	#url(path) {
+		return new URL(`_apis/artifactcache/${path}`, this.#base);
+	}
+
+	#send(path, init = {}) {
+		return this.#fetch(this.#url(path), {
+			...init,
+			headers: { ...this.#headers, ...(init.headers || {}) },
+		});
+	}
+
+	async restore() {
+		if (!this.#enabled) return null;
 		try {
-			const lookup = url("cache");
+			const lookup = this.#url("cache");
 			// Primary key won't match anything we ever save; second is the prefix.
 			lookup.searchParams.set(
 				"keys",
 				`${CACHE_KEY_PREFIX}__sentinel__,${CACHE_KEY_PREFIX}`,
 			);
 			lookup.searchParams.set("version", CACHE_VERSION);
-			const res = await fetch(lookup, { headers });
+			const res = await this.#fetch(lookup, { headers: this.#headers });
 			if (res.status === 204) {
 				console.log("cache: cold (no prior entry)");
 				return null;
@@ -414,7 +447,7 @@ export function createCache({
 			}
 			const meta = await res.json();
 			if (!meta?.archiveLocation) return null;
-			const blob = await fetch(meta.archiveLocation);
+			const blob = await this.#fetch(meta.archiveLocation);
 			if (!blob.ok) {
 				console.warn(`cache blob fetch status ${blob.status}`);
 				return null;
@@ -428,12 +461,12 @@ export function createCache({
 		}
 	}
 
-	async function save(state, key) {
-		if (!enabled) return;
+	async save(state, key) {
+		if (!this.#enabled) return;
 		try {
 			const body = Buffer.from(JSON.stringify(state), "utf8");
 
-			const reserveRes = await send("caches", {
+			const reserveRes = await this.#send("caches", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
@@ -449,7 +482,7 @@ export function createCache({
 			const cacheId = (await reserveRes.json())?.cacheId;
 			if (!cacheId) return;
 
-			const uploadRes = await send(`caches/${cacheId}`, {
+			const uploadRes = await this.#send(`caches/${cacheId}`, {
 				method: "PATCH",
 				headers: {
 					"Content-Type": "application/octet-stream",
@@ -462,7 +495,7 @@ export function createCache({
 				return;
 			}
 
-			const commitRes = await send(`caches/${cacheId}`, {
+			const commitRes = await this.#send(`caches/${cacheId}`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ size: body.length }),
@@ -476,69 +509,71 @@ export function createCache({
 			console.warn(`cache save failed: ${e.message}`);
 		}
 	}
-
-	return { restore, save };
 }
 
 // ---------------------------------------------------------------- main
 
 async function main() {
-	const token = input("slack-token").trim();
-	if (!token) {
-		console.log("slack-token empty; skipping");
-		return;
-	}
-	console.log(`::add-mask::${token}`);
-	const slack = createSlackClient({ token });
-
-	const eventPath = process.env.GITHUB_EVENT_PATH;
-	const eventName = process.env.GITHUB_EVENT_NAME;
-	if (!eventPath || !eventName) {
-		console.error("GITHUB_EVENT_PATH/GITHUB_EVENT_NAME not set");
-		return;
-	}
-	const payload = JSON.parse(fs.readFileSync(eventPath, "utf8"));
-
-	const status = deriveStatus(eventName, payload);
-	if (!status) {
-		console.log(`event ${eventName}.${payload.action} → no status mapping`);
-		return;
-	}
-
-	const emoji = input(`emoji-${status}`).trim();
-	if (!emoji) {
-		console.log(`status ${status} has no configured emoji; skipping`);
-		return;
-	}
-
-	const opposite = FLIP_OPPOSITE[status] || null;
-	const oppositeEmoji = opposite
-		? input(`emoji-${opposite}`).trim() || null
-		: null;
-
-	const isRerun = parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) > 1;
-	if (isRerun) console.log("run_attempt > 1: skipping flip cleanup for safety");
-
-	const prCtx = prContext(payload);
-	if (!prCtx) {
-		console.error("could not derive PR context from payload");
-		return;
-	}
-	const prKey = `${prCtx.owner}/${prCtx.repo}#${prCtx.num}`;
-
-	const cache = createCache();
-	const state = (await cache.restore()) || {};
-	const beforeSweep = state.prMatches || {};
-	state.prMatches = sweepStale(beforeSweep, nowS() - PR_STALE_TTL_S);
-	let dirty =
-		Object.keys(state.prMatches).length !== Object.keys(beforeSweep).length;
-	if (dirty) {
-		const swept =
-			Object.keys(beforeSweep).length - Object.keys(state.prMatches).length;
-		console.log(`cache: swept ${swept} stale entr${swept === 1 ? "y" : "ies"}`);
-	}
-
 	try {
+		const token = invariant(
+			input("slack-token").trim(),
+			"slack-token empty; skipping (likely a fork PR, or the secret isn't set)",
+			"warn",
+		);
+		console.log(`::add-mask::${token}`);
+		const slack = new SlackClient({ token });
+
+		const eventPath = invariant(
+			process.env.GITHUB_EVENT_PATH,
+			"GITHUB_EVENT_PATH not set; not running inside GitHub Actions",
+			"error",
+		);
+		const eventName = invariant(
+			process.env.GITHUB_EVENT_NAME,
+			"GITHUB_EVENT_NAME not set; not running inside GitHub Actions",
+			"error",
+		);
+		const payload = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+
+		const status = invariant(
+			deriveStatus(eventName, payload),
+			`event ${eventName}.${payload.action} → no status mapping`,
+		);
+		const emoji = invariant(
+			input(`emoji-${status}`).trim() || null,
+			`status ${status} has no configured emoji; skipping`,
+		);
+
+		const opposite = FLIP_OPPOSITE[status] || null;
+		const oppositeEmoji = opposite
+			? input(`emoji-${opposite}`).trim() || null
+			: null;
+
+		const isRerun = parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) > 1;
+		if (isRerun)
+			console.log("run_attempt > 1: skipping flip cleanup for safety");
+
+		const prCtx = invariant(
+			prContext(payload),
+			"could not derive PR context from payload",
+			"error",
+		);
+		const prKey = `${prCtx.owner}/${prCtx.repo}#${prCtx.num}`;
+
+		const cache = new CacheClient();
+		const state = (await cache.restore()) || {};
+		const beforeSweep = state.prMatches || {};
+		state.prMatches = sweepStale(beforeSweep, nowS() - PR_STALE_TTL_S);
+		let dirty =
+			Object.keys(state.prMatches).length !== Object.keys(beforeSweep).length;
+		if (dirty) {
+			const swept =
+				Object.keys(beforeSweep).length - Object.keys(state.prMatches).length;
+			console.log(
+				`cache: swept ${swept} stale entr${swept === 1 ? "y" : "ies"}`,
+			);
+		}
+
 		let matches;
 		const cached = state.prMatches[prKey]?.matches;
 		if (cached?.length) {
@@ -610,7 +645,15 @@ async function main() {
 				`pr-entries safety cap; evicted ${Object.keys(beforeCap).length - Object.keys(state.prMatches).length}`,
 			);
 		}
+		if (!dirty) {
+			console.log("cache: state unchanged; skipping save");
+			return;
+		}
+		const runId = process.env.GITHUB_RUN_ID || "norunid";
+		const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
+		await cache.save(state, `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`);
 	} catch (e) {
+		if (e instanceof SkipRun) return;
 		if (e instanceof AuthError) {
 			console.error(
 				`Slack auth error: ${e.code} — exiting cleanly. Refresh the SLACK_TOKEN secret.`,
@@ -619,14 +662,6 @@ async function main() {
 		}
 		throw e;
 	}
-
-	if (!dirty) {
-		console.log("cache: state unchanged; skipping save");
-		return;
-	}
-	const runId = process.env.GITHUB_RUN_ID || "norunid";
-	const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
-	await cache.save(state, `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`);
 }
 
 if (import.meta.main) {
