@@ -48,16 +48,31 @@ const CACHE_VERSION = "slack-emoji-reactions-v1";
 
 // ---------------------------------------------------------------- helpers
 
-const log = (...a) => console.log(...a);
-const warn = (...a) => console.warn(...a);
-const err = (...a) => console.error(...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowS = () => Math.floor(Date.now() / 1000);
 
 // GHA preserves hyphens in INPUT_* env vars (only spaces become underscores).
 const input = (name) => process.env[`INPUT_${name.toUpperCase()}`] || "";
 
-class AuthError extends Error {
+const sweepStale = (entries, cutoffS) =>
+	Object.fromEntries(
+		Object.entries(entries).filter(([, v]) => (v.lastTouched || 0) >= cutoffS),
+	);
+
+const capByLru = (entries, max) => {
+	const keys = Object.keys(entries);
+	if (keys.length <= max) return entries;
+	keys.sort(
+		(a, b) => (entries[a].lastTouched || 0) - (entries[b].lastTouched || 0),
+	);
+	return Object.fromEntries(
+		keys.slice(keys.length - max).map((k) => [k, entries[k]]),
+	);
+};
+
+const keepsMatch = (result) => !STALE_MATCH_ERRORS.has(result.error);
+
+export class AuthError extends Error {
 	constructor(code) {
 		super(code);
 		this.code = code;
@@ -93,7 +108,7 @@ export function createSlackClient({
 				});
 				lastBody = await res.json();
 			} catch (e) {
-				warn(
+				console.warn(
 					`slack ${method} network error: ${e.message} (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
 				);
 				if (attempt >= MAX_RETRIES)
@@ -111,7 +126,7 @@ export function createSlackClient({
 				parseInt(res.headers.get("retry-after"), 10) || 1,
 				RETRY_AFTER_CAP_S,
 			);
-			log(
+			console.log(
 				`slack ${method} ratelimited; retry-after ${retry}s (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
 			);
 			if (attempt >= MAX_RETRIES) break;
@@ -131,7 +146,7 @@ function checkAuth(res) {
 
 // ---------------------------------------------------------------- url match
 
-function tokenizeAngles(text) {
+export function tokenizeAngles(text) {
 	const out = [];
 	let i = 0;
 	while (i < text.length) {
@@ -148,26 +163,23 @@ function tokenizeAngles(text) {
 	return out;
 }
 
-function walkForUrls(node, out) {
-	if (!node || typeof node !== "object") return;
-	if (typeof node.url === "string") out.push(node.url);
-	for (const v of Object.values(node)) walkForUrls(v, out);
+function walkForUrls(node) {
+	if (!node || typeof node !== "object") return [];
+	const here = typeof node.url === "string" ? [node.url] : [];
+	return here.concat(...Object.values(node).map(walkForUrls));
 }
 
-function urlsFromMessage(message) {
-	const out = [];
-	if (typeof message.text === "string") {
-		for (const cand of tokenizeAngles(message.text)) out.push(cand);
-	}
-	for (const att of message.attachments || []) {
-		if (typeof att.title_link === "string") out.push(att.title_link);
-		if (typeof att.from_url === "string") out.push(att.from_url);
-	}
-	for (const block of message.blocks || []) walkForUrls(block, out);
-	return out;
+export function urlsFromMessage(message) {
+	const fromText =
+		typeof message.text === "string" ? tokenizeAngles(message.text) : [];
+	const fromAttachments = (message.attachments || []).flatMap((a) =>
+		[a.title_link, a.from_url].filter((s) => typeof s === "string"),
+	);
+	const fromBlocks = (message.blocks || []).flatMap(walkForUrls);
+	return [...fromText, ...fromAttachments, ...fromBlocks];
 }
 
-function matchesPullUrl(candidate, owner, repo, num) {
+export function matchesPullUrl(candidate, owner, repo, num) {
 	let u;
 	try {
 		u = new URL(candidate);
@@ -188,7 +200,7 @@ function matchesPullUrl(candidate, owner, repo, num) {
 
 // ---------------------------------------------------------------- event → status
 
-function deriveStatus(eventName, payload) {
+export function deriveStatus(eventName, payload) {
 	if (eventName === "pull_request_review") {
 		if (payload.action !== "submitted") return null;
 		const state = payload.review?.state;
@@ -203,7 +215,7 @@ function deriveStatus(eventName, payload) {
 	return null;
 }
 
-function prContext(payload) {
+export function prContext(payload) {
 	const pr = payload.pull_request;
 	const owner = pr?.base?.repo?.owner?.login;
 	const repo = pr?.base?.repo?.name;
@@ -220,7 +232,7 @@ export async function ensureBotUserId(state, slack) {
 	checkAuth(res);
 	if (!res.ok) throw new Error(`auth.test failed: ${res.error}`);
 	state.botUserId = res.user_id;
-	log(`auth.test → bot user ${state.botUserId}`);
+	console.log(`auth.test → bot user ${state.botUserId}`);
 	return state.botUserId;
 }
 
@@ -251,7 +263,7 @@ export async function ensureChannels(state, slack) {
 	}
 	state.channels = channels;
 	state.channelsRefreshedAt = nowS();
-	log(`channels refreshed: ${channels.length} bot-member channel(s)`);
+	console.log(`channels refreshed: ${channels.length} bot-member channel(s)`);
 	return channels;
 }
 
@@ -261,7 +273,7 @@ export async function discoverMatches(channels, owner, repo, num, slack) {
 	let scanned = 0;
 	for (const ch of channels) {
 		if (scanned >= MAX_CHANNELS_PER_RUN) {
-			warn(
+			console.warn(
 				`channels-per-run cap (${MAX_CHANNELS_PER_RUN}) reached; skipped ${channels.length - scanned} remaining`,
 			);
 			break;
@@ -279,7 +291,9 @@ export async function discoverMatches(channels, owner, repo, num, slack) {
 			const res = await slack.call("conversations.history", params);
 			checkAuth(res);
 			if (!res.ok) {
-				warn(`conversations.history ${ch.id}(${ch.name}): ${res.error}`);
+				console.warn(
+					`conversations.history ${ch.id}(${ch.name}): ${res.error}`,
+				);
 				break;
 			}
 			for (const msg of res.messages || []) {
@@ -294,7 +308,7 @@ export async function discoverMatches(channels, owner, repo, num, slack) {
 			cursor = res.response_metadata?.next_cursor || "";
 			if (!cursor || !res.has_more) break;
 		}
-		if (foundInChannel) log(`match in #${ch.name} (${ch.id})`);
+		if (foundInChannel) console.log(`match in #${ch.name} (${ch.id})`);
 	}
 	return matches;
 }
@@ -323,7 +337,7 @@ export async function reactToMatch(match, ctx) {
 					name: oppositeEmoji,
 				});
 				checkAuth(rm);
-				log(
+				console.log(
 					JSON.stringify({
 						match: where,
 						status,
@@ -335,7 +349,7 @@ export async function reactToMatch(match, ctx) {
 				);
 			}
 		} else if (!TOLERATED_REACTION_ERRORS.has(got.error)) {
-			warn(`reactions.get ${where}: ${got.error}`);
+			console.warn(`reactions.get ${where}: ${got.error}`);
 		}
 	}
 
@@ -345,7 +359,7 @@ export async function reactToMatch(match, ctx) {
 		name: emoji,
 	});
 	checkAuth(add);
-	log(
+	console.log(
 		JSON.stringify({
 			match: where,
 			status,
@@ -360,108 +374,110 @@ export async function reactToMatch(match, ctx) {
 
 // ---------------------------------------------------------------- cache (GHA v1 API)
 
-const CACHE_BASE = (() => {
-	const url = process.env.ACTIONS_CACHE_URL || "";
-	if (!url) return "";
-	return url.endsWith("/") ? url : `${url}/`;
-})();
-const CACHE_TOKEN = process.env.ACTIONS_RUNTIME_TOKEN || "";
-const CACHE_HEADERS = {
-	Authorization: `Bearer ${CACHE_TOKEN}`,
-	Accept: "application/json;api-version=6.0-preview.1",
-};
+export function createCache({
+	env = process.env,
+	fetch = globalThis.fetch,
+} = {}) {
+	const rawBase = env.ACTIONS_CACHE_URL || "";
+	const base = rawBase.endsWith("/") ? rawBase : rawBase ? `${rawBase}/` : "";
+	const token = env.ACTIONS_RUNTIME_TOKEN || "";
+	const headers = {
+		Authorization: `Bearer ${token}`,
+		Accept: "application/json;api-version=6.0-preview.1",
+	};
+	const enabled = !!base && !!token;
+	const url = (path) => new URL(`_apis/artifactcache/${path}`, base);
+	const send = (path, init = {}) =>
+		fetch(url(path), {
+			...init,
+			headers: { ...headers, ...(init.headers || {}) },
+		});
 
-const cacheUrl = (path) => new URL(`_apis/artifactcache/${path}`, CACHE_BASE);
-
-async function cacheFetch(path, init = {}) {
-	return fetch(cacheUrl(path), {
-		...init,
-		headers: { ...CACHE_HEADERS, ...(init.headers || {}) },
-	});
-}
-
-async function cacheRestore() {
-	if (!CACHE_BASE || !CACHE_TOKEN) return null;
-	try {
-		const u = cacheUrl("cache");
-		// Primary key won't match anything we ever save; second is the prefix.
-		u.searchParams.set(
-			"keys",
-			`${CACHE_KEY_PREFIX}__sentinel__,${CACHE_KEY_PREFIX}`,
-		);
-		u.searchParams.set("version", CACHE_VERSION);
-		const res = await fetch(u, { headers: CACHE_HEADERS });
-		if (res.status === 204) {
-			log("cache: cold (no prior entry)");
+	async function restore() {
+		if (!enabled) return null;
+		try {
+			const lookup = url("cache");
+			// Primary key won't match anything we ever save; second is the prefix.
+			lookup.searchParams.set(
+				"keys",
+				`${CACHE_KEY_PREFIX}__sentinel__,${CACHE_KEY_PREFIX}`,
+			);
+			lookup.searchParams.set("version", CACHE_VERSION);
+			const res = await fetch(lookup, { headers });
+			if (res.status === 204) {
+				console.log("cache: cold (no prior entry)");
+				return null;
+			}
+			if (!res.ok) {
+				console.warn(`cache restore lookup status ${res.status}`);
+				return null;
+			}
+			const meta = await res.json();
+			if (!meta?.archiveLocation) return null;
+			const blob = await fetch(meta.archiveLocation);
+			if (!blob.ok) {
+				console.warn(`cache blob fetch status ${blob.status}`);
+				return null;
+			}
+			const state = await blob.json();
+			console.log(`cache: restored ${meta.cacheKey}`);
+			return state;
+		} catch (e) {
+			console.warn(`cache restore failed: ${e.message}`);
 			return null;
 		}
-		if (!res.ok) {
-			warn(`cache restore lookup status ${res.status}`);
-			return null;
-		}
-		const meta = await res.json();
-		if (!meta?.archiveLocation) return null;
-		const blob = await fetch(meta.archiveLocation);
-		if (!blob.ok) {
-			warn(`cache blob fetch status ${blob.status}`);
-			return null;
-		}
-		const state = await blob.json();
-		log(`cache: restored ${meta.cacheKey}`);
-		return state;
-	} catch (e) {
-		warn(`cache restore failed: ${e.message}`);
-		return null;
 	}
-}
 
-async function cacheSave(state, key) {
-	if (!CACHE_BASE || !CACHE_TOKEN) return;
-	try {
-		const body = Buffer.from(JSON.stringify(state), "utf8");
+	async function save(state, key) {
+		if (!enabled) return;
+		try {
+			const body = Buffer.from(JSON.stringify(state), "utf8");
 
-		const reserveRes = await cacheFetch("caches", {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				key,
-				version: CACHE_VERSION,
-				cacheSize: body.length,
-			}),
-		});
-		if (!reserveRes.ok) {
-			warn(`cache reserve status ${reserveRes.status}`);
-			return;
+			const reserveRes = await send("caches", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					key,
+					version: CACHE_VERSION,
+					cacheSize: body.length,
+				}),
+			});
+			if (!reserveRes.ok) {
+				console.warn(`cache reserve status ${reserveRes.status}`);
+				return;
+			}
+			const cacheId = (await reserveRes.json())?.cacheId;
+			if (!cacheId) return;
+
+			const uploadRes = await send(`caches/${cacheId}`, {
+				method: "PATCH",
+				headers: {
+					"Content-Type": "application/octet-stream",
+					"Content-Range": `bytes 0-${body.length - 1}/*`,
+				},
+				body,
+			});
+			if (!uploadRes.ok) {
+				console.warn(`cache upload status ${uploadRes.status}`);
+				return;
+			}
+
+			const commitRes = await send(`caches/${cacheId}`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ size: body.length }),
+			});
+			if (!commitRes.ok) {
+				console.warn(`cache commit status ${commitRes.status}`);
+				return;
+			}
+			console.log(`cache: saved ${key} (${body.length} bytes)`);
+		} catch (e) {
+			console.warn(`cache save failed: ${e.message}`);
 		}
-		const cacheId = (await reserveRes.json())?.cacheId;
-		if (!cacheId) return;
-
-		const uploadRes = await cacheFetch(`caches/${cacheId}`, {
-			method: "PATCH",
-			headers: {
-				"Content-Type": "application/octet-stream",
-				"Content-Range": `bytes 0-${body.length - 1}/*`,
-			},
-			body,
-		});
-		if (!uploadRes.ok) {
-			warn(`cache upload status ${uploadRes.status}`);
-			return;
-		}
-
-		const commitRes = await cacheFetch(`caches/${cacheId}`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ size: body.length }),
-		});
-		if (!commitRes.ok) {
-			warn(`cache commit status ${commitRes.status}`);
-			return;
-		}
-		log(`cache: saved ${key} (${body.length} bytes)`);
-	} catch (e) {
-		warn(`cache save failed: ${e.message}`);
 	}
+
+	return { restore, save };
 }
 
 // ---------------------------------------------------------------- main
@@ -469,7 +485,7 @@ async function cacheSave(state, key) {
 async function main() {
 	const token = input("slack-token").trim();
 	if (!token) {
-		log("slack-token empty; skipping");
+		console.log("slack-token empty; skipping");
 		return;
 	}
 	console.log(`::add-mask::${token}`);
@@ -478,20 +494,20 @@ async function main() {
 	const eventPath = process.env.GITHUB_EVENT_PATH;
 	const eventName = process.env.GITHUB_EVENT_NAME;
 	if (!eventPath || !eventName) {
-		err("GITHUB_EVENT_PATH/GITHUB_EVENT_NAME not set");
+		console.error("GITHUB_EVENT_PATH/GITHUB_EVENT_NAME not set");
 		return;
 	}
 	const payload = JSON.parse(fs.readFileSync(eventPath, "utf8"));
 
 	const status = deriveStatus(eventName, payload);
 	if (!status) {
-		log(`event ${eventName}.${payload.action} → no status mapping`);
+		console.log(`event ${eventName}.${payload.action} → no status mapping`);
 		return;
 	}
 
 	const emoji = input(`emoji-${status}`).trim();
 	if (!emoji) {
-		log(`status ${status} has no configured emoji; skipping`);
+		console.log(`status ${status} has no configured emoji; skipping`);
 		return;
 	}
 
@@ -501,30 +517,25 @@ async function main() {
 		: null;
 
 	const isRerun = parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) > 1;
-	if (isRerun) log("run_attempt > 1: skipping flip cleanup for safety");
+	if (isRerun) console.log("run_attempt > 1: skipping flip cleanup for safety");
 
 	const prCtx = prContext(payload);
 	if (!prCtx) {
-		err("could not derive PR context from payload");
+		console.error("could not derive PR context from payload");
 		return;
 	}
 	const prKey = `${prCtx.owner}/${prCtx.repo}#${prCtx.num}`;
 
-	const state = (await cacheRestore()) || {};
-	state.prMatches = state.prMatches || {};
-	let dirty = false;
-
-	const staleCutoff = nowS() - PR_STALE_TTL_S;
-	let swept = 0;
-	for (const k of Object.keys(state.prMatches)) {
-		if ((state.prMatches[k].lastTouched || 0) < staleCutoff) {
-			delete state.prMatches[k];
-			swept++;
-		}
-	}
-	if (swept > 0) {
-		log(`cache: swept ${swept} stale entr${swept === 1 ? "y" : "ies"}`);
-		dirty = true;
+	const cache = createCache();
+	const state = (await cache.restore()) || {};
+	const beforeSweep = state.prMatches || {};
+	state.prMatches = sweepStale(beforeSweep, nowS() - PR_STALE_TTL_S);
+	let dirty =
+		Object.keys(state.prMatches).length !== Object.keys(beforeSweep).length;
+	if (dirty) {
+		const swept =
+			Object.keys(beforeSweep).length - Object.keys(state.prMatches).length;
+		console.log(`cache: swept ${swept} stale entr${swept === 1 ? "y" : "ies"}`);
 	}
 
 	try {
@@ -532,11 +543,11 @@ async function main() {
 		const cached = state.prMatches[prKey]?.matches;
 		if (cached?.length) {
 			matches = cached;
-			log(`cache hit for ${prKey}: ${matches.length} match(es)`);
+			console.log(`cache hit for ${prKey}: ${matches.length} match(es)`);
 		} else {
 			await ensureBotUserId(state, slack);
 			const channels = await ensureChannels(state, slack);
-			log(
+			console.log(
 				`scanning ${Math.min(channels.length, MAX_CHANNELS_PER_RUN)} channel(s) for ${prCtx.prUrl}`,
 			);
 			matches = await discoverMatches(
@@ -546,7 +557,7 @@ async function main() {
 				prCtx.num,
 				slack,
 			);
-			log(`discovery: ${matches.length} match(es) for ${prKey}`);
+			console.log(`discovery: ${matches.length} match(es) for ${prKey}`);
 			dirty = true;
 		}
 
@@ -565,50 +576,43 @@ async function main() {
 			dirty = true;
 		}
 
-		const survivors = [];
-		let reacted = 0;
-		for (const m of matches) {
-			if (reacted >= REACTIONS_PER_RUN_CAP) {
-				const remaining = matches.slice(reacted);
-				warn(
-					`reactions-per-run cap (${REACTIONS_PER_RUN_CAP}) reached; ${remaining.length} skipped (kept in cache for next run)`,
-				);
-				// Preserve un-iterated matches in the cache; otherwise the cap silently
-				// truncates the entry and the next run has to re-discover them.
-				survivors.push(...remaining);
-				break;
-			}
-			reacted++;
-			const result = await reactToMatch(m, reactCtx);
-			if (!STALE_MATCH_ERRORS.has(result.error)) survivors.push(m);
+		// Split matches into the portion we'll react to this run + the overflow
+		// that gets carried forward in the cache so the next run picks it up.
+		const toReact = matches.slice(0, REACTIONS_PER_RUN_CAP);
+		const overflow = matches.slice(REACTIONS_PER_RUN_CAP);
+		if (overflow.length) {
+			console.warn(
+				`reactions-per-run cap (${REACTIONS_PER_RUN_CAP}) reached; ${overflow.length} kept in cache for next run`,
+			);
 		}
+
+		const reacted = [];
+		for (const m of toReact) reacted.push([m, await reactToMatch(m, reactCtx)]);
+		const survivors = [
+			...reacted.filter(([, r]) => keepsMatch(r)).map(([m]) => m),
+			...overflow,
+		];
 
 		// Reaction loop always touches the entry (delete on terminal, rewrite
 		// with bumped lastTouched on continuing). Mark dirty unconditionally.
 		dirty = true;
-		if (status === STATUS_MERGED || status === STATUS_CLOSED) {
-			delete state.prMatches[prKey];
-		} else if (survivors.length) {
-			state.prMatches[prKey] = { matches: survivors, lastTouched: nowS() };
-		} else {
-			delete state.prMatches[prKey];
-		}
+		const isTerminal = status === STATUS_MERGED || status === STATUS_CLOSED;
+		const { [prKey]: _evicted, ...rest } = state.prMatches;
+		state.prMatches =
+			isTerminal || !survivors.length
+				? rest
+				: { ...rest, [prKey]: { matches: survivors, lastTouched: nowS() } };
 
-		const keys = Object.keys(state.prMatches);
-		if (keys.length > MAX_PR_ENTRIES) {
-			keys.sort(
-				(a, b) =>
-					(state.prMatches[a].lastTouched || 0) -
-					(state.prMatches[b].lastTouched || 0),
+		const beforeCap = state.prMatches;
+		state.prMatches = capByLru(state.prMatches, MAX_PR_ENTRIES);
+		if (Object.keys(state.prMatches).length !== Object.keys(beforeCap).length) {
+			console.warn(
+				`pr-entries safety cap; evicted ${Object.keys(beforeCap).length - Object.keys(state.prMatches).length}`,
 			);
-			const evict = keys.slice(0, keys.length - MAX_PR_ENTRIES);
-			for (const k of evict) delete state.prMatches[k];
-			warn(`pr-entries safety cap; evicted ${evict.length}`);
-			dirty = true;
 		}
 	} catch (e) {
 		if (e instanceof AuthError) {
-			err(
+			console.error(
 				`Slack auth error: ${e.code} — exiting cleanly. Refresh the SLACK_TOKEN secret.`,
 			);
 			return;
@@ -617,26 +621,17 @@ async function main() {
 	}
 
 	if (!dirty) {
-		log("cache: state unchanged; skipping save");
+		console.log("cache: state unchanged; skipping save");
 		return;
 	}
 	const runId = process.env.GITHUB_RUN_ID || "norunid";
 	const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
-	await cacheSave(state, `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`);
+	await cache.save(state, `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`);
 }
-
-export {
-	AuthError,
-	deriveStatus,
-	matchesPullUrl,
-	prContext,
-	tokenizeAngles,
-	urlsFromMessage,
-};
 
 if (import.meta.main) {
 	main().catch((e) => {
-		err(e?.stack || String(e));
+		console.error(e?.stack || String(e));
 		process.exit(1);
 	});
 }
