@@ -72,27 +72,17 @@ const capByLru = (entries, max) => {
 
 const keepsMatch = (result) => !STALE_MATCH_ERRORS.has(result.error);
 
+// Thrown deep inside slack.call when Slack returns an auth-class error and
+// caught by main()'s narrow try/catch. The message is operator-facing and
+// lives on the exception itself.
 export class AuthError extends Error {
 	constructor(code) {
-		super(code);
+		super(
+			`Slack auth error: ${code} — exiting cleanly. Refresh the SLACK_TOKEN secret.`,
+		);
 		this.code = code;
 	}
 }
-
-// Sentinel: thrown by `invariant` to short-circuit main(). The outer catch
-// turns this into a clean exit-0 — the level was already logged at the call site.
-class SkipRun extends Error {}
-
-// Three levels intentionally: routine "no work to do" skips stay quiet (log);
-// "operator probably needs to know" surfaces as a yellow annotation (warn);
-// "this should not happen / requires action" goes red (error).
-const invariant = (value, message, level = "log") => {
-	if (!value) {
-		console[level](message);
-		throw new SkipRun();
-	}
-	return value;
-};
 
 // ---------------------------------------------------------------- slack client
 
@@ -202,12 +192,8 @@ export function urlsFromMessage(message) {
 }
 
 export function matchesPullUrl(candidate, owner, repo, num) {
-	let u;
-	try {
-		u = new URL(candidate);
-	} catch {
-		return false;
-	}
+	if (!URL.canParse(candidate)) return false;
+	const u = new URL(candidate);
 	if (u.host !== "github.com") return false;
 	const parts = u.pathname.split("/");
 	return (
@@ -514,66 +500,76 @@ export class CacheClient {
 // ---------------------------------------------------------------- main
 
 async function main() {
-	try {
-		const token = invariant(
-			input("slack-token").trim(),
-			"slack-token empty; skipping (likely a fork PR, or the secret isn't set)",
-			"warn",
-		);
-		console.log(`::add-mask::${token}`);
-		const slack = new SlackClient({ token });
-
-		const eventPath = invariant(
-			process.env.GITHUB_EVENT_PATH,
+	const eventPath = process.env.GITHUB_EVENT_PATH;
+	if (!eventPath) {
+		console.error(
 			"GITHUB_EVENT_PATH not set; not running inside GitHub Actions",
-			"error",
 		);
-		const eventName = invariant(
-			process.env.GITHUB_EVENT_NAME,
+		return;
+	}
+	const eventName = process.env.GITHUB_EVENT_NAME;
+	if (!eventName) {
+		console.error(
 			"GITHUB_EVENT_NAME not set; not running inside GitHub Actions",
-			"error",
 		);
-		const payload = JSON.parse(fs.readFileSync(eventPath, "utf8"));
+		return;
+	}
+	const payload = JSON.parse(fs.readFileSync(eventPath, "utf8"));
 
-		const status = invariant(
-			deriveStatus(eventName, payload),
-			`event ${eventName}.${payload.action} → no status mapping`,
-		);
-		const emoji = invariant(
-			input(`emoji-${status}`).trim() || null,
-			`status ${status} has no configured emoji; skipping`,
-		);
+	const status = deriveStatus(eventName, payload);
+	if (!status) {
+		console.log(`event ${eventName}.${payload.action} → no status mapping`);
+		return;
+	}
 
-		const opposite = FLIP_OPPOSITE[status] || null;
-		const oppositeEmoji = opposite
-			? input(`emoji-${opposite}`).trim() || null
-			: null;
+	const emoji = input(`emoji-${status}`).trim();
+	if (!emoji) {
+		console.log(`status ${status} has no configured emoji; skipping`);
+		return;
+	}
 
-		const isRerun = parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) > 1;
-		if (isRerun)
-			console.log("run_attempt > 1: skipping flip cleanup for safety");
-
-		const prCtx = invariant(
-			prContext(payload),
-			"could not derive PR context from payload",
-			"error",
-		);
-		const prKey = `${prCtx.owner}/${prCtx.repo}#${prCtx.num}`;
-
-		const cache = new CacheClient();
-		const state = (await cache.restore()) || {};
-		const beforeSweep = state.prMatches || {};
-		state.prMatches = sweepStale(beforeSweep, nowS() - PR_STALE_TTL_S);
-		let dirty =
-			Object.keys(state.prMatches).length !== Object.keys(beforeSweep).length;
-		if (dirty) {
-			const swept =
-				Object.keys(beforeSweep).length - Object.keys(state.prMatches).length;
-			console.log(
-				`cache: swept ${swept} stale entr${swept === 1 ? "y" : "ies"}`,
-			);
+	const token = input("slack-token").trim();
+	if (!token) {
+		// Fork PRs run with empty secrets by design; that's not a configuration error.
+		if (payload.pull_request?.head?.repo?.fork) {
+			console.log("fork PR — secrets unavailable, skipping (expected)");
+			return;
 		}
+		console.error("slack-token is missing; set the SLACK_TOKEN secret");
+		return;
+	}
+	console.log(`::add-mask::${token}`);
 
+	const prCtx = prContext(payload);
+	if (!prCtx) {
+		console.error("could not derive PR context from payload");
+		return;
+	}
+	const prKey = `${prCtx.owner}/${prCtx.repo}#${prCtx.num}`;
+
+	const opposite = FLIP_OPPOSITE[status] || null;
+	const oppositeEmoji = opposite
+		? input(`emoji-${opposite}`).trim() || null
+		: null;
+	const isRerun = parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) > 1;
+	if (isRerun) console.log("run_attempt > 1: skipping flip cleanup for safety");
+
+	const slack = new SlackClient({ token });
+	const cache = new CacheClient();
+	const state = (await cache.restore()) || {};
+	const beforeSweep = state.prMatches || {};
+	state.prMatches = sweepStale(beforeSweep, nowS() - PR_STALE_TTL_S);
+	let dirty =
+		Object.keys(state.prMatches).length !== Object.keys(beforeSweep).length;
+	if (dirty) {
+		const swept =
+			Object.keys(beforeSweep).length - Object.keys(state.prMatches).length;
+		console.log(`cache: swept ${swept} stale entr${swept === 1 ? "y" : "ies"}`);
+	}
+
+	// Narrow try/catch around just the section that can throw AuthError. The
+	// validation guards above never throw — they early-return.
+	try {
 		let matches;
 		const cached = state.prMatches[prKey]?.matches;
 		if (cached?.length) {
@@ -653,11 +649,8 @@ async function main() {
 		const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
 		await cache.save(state, `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`);
 	} catch (e) {
-		if (e instanceof SkipRun) return;
 		if (e instanceof AuthError) {
-			console.error(
-				`Slack auth error: ${e.code} — exiting cleanly. Refresh the SLACK_TOKEN secret.`,
-			);
+			console.error(e.message);
 			return;
 		}
 		throw e;
