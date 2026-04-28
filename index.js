@@ -1,7 +1,5 @@
 import fs from "node:fs";
 
-// ---------------------------------------------------------------- constants
-
 const SLACK_API = "https://slack.com/api/";
 
 const STATUS_APPROVED = "approved";
@@ -46,33 +44,13 @@ const MAX_RETRIES = 3;
 const CACHE_KEY_PREFIX = "slack-emoji-reactions-state-";
 const CACHE_VERSION = "slack-emoji-reactions-v1";
 
-// ---------------------------------------------------------------- pure helpers
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowS = () => Math.floor(Date.now() / 1000);
 
 // GHA preserves hyphens in INPUT_* env vars (only spaces become underscores).
 const input = (name) => process.env[`INPUT_${name.toUpperCase()}`] || "";
 
-const sweepStale = (entries, cutoffS) =>
-	Object.fromEntries(
-		Object.entries(entries).filter(([, v]) => (v.lastTouched || 0) >= cutoffS),
-	);
-
-const capByLru = (entries, max) => {
-	const keys = Object.keys(entries);
-	if (keys.length <= max) return entries;
-	keys.sort(
-		(a, b) => (entries[a].lastTouched || 0) - (entries[b].lastTouched || 0),
-	);
-	return Object.fromEntries(
-		keys.slice(keys.length - max).map((k) => [k, entries[k]]),
-	);
-};
-
 const keepsMatch = (result) => !STALE_MATCH_ERRORS.has(result.error);
-
-// ---------------------------------------------------------------- url + event
 
 export function tokenizeAngles(text) {
 	const out = [];
@@ -144,9 +122,6 @@ export function prContext(payload) {
 	return { owner, repo, num, prUrl: pr.html_url };
 }
 
-// ---------------------------------------------------------------- auth error
-
-// Carries its own operator-facing message; the entrypoint catch prints it.
 export class AuthError extends Error {
 	constructor(code) {
 		super(
@@ -161,8 +136,6 @@ function checkAuth(res) {
 		throw new AuthError(res.error);
 	}
 }
-
-// ---------------------------------------------------------------- clients
 
 export class SlackClient {
 	#token;
@@ -226,7 +199,7 @@ export class SlackClient {
 			if (attempt >= MAX_RETRIES) break;
 			await sleep(retry * 1000);
 		}
-		return lastBody ?? { ok: false, error: "ratelimited" };
+		return lastBody;
 	}
 }
 
@@ -339,7 +312,53 @@ export class CacheClient {
 	}
 }
 
-// ---------------------------------------------------------------- state + slack ops
+// Per-PR cache map: { "owner/repo#num" → { matches, lastTouched } }.
+// Encapsulates the lifecycle (read/write/delete + stale-sweep + LRU cap)
+// so callers don't reach into the entries' shape directly.
+export class PrMatches {
+	#entries;
+
+	constructor(entries = {}) {
+		this.#entries = entries;
+	}
+
+	get(key) {
+		return this.#entries[key]?.matches;
+	}
+
+	set(key, matches) {
+		this.#entries[key] = { matches, lastTouched: nowS() };
+	}
+
+	delete(key) {
+		delete this.#entries[key];
+	}
+
+	// Evict entries last touched before `cutoffS`. Returns count removed.
+	sweepStale(cutoffS) {
+		const before = Object.keys(this.#entries).length;
+		this.#entries = Object.fromEntries(
+			Object.entries(this.#entries).filter(([, v]) => v.lastTouched >= cutoffS),
+		);
+		return before - Object.keys(this.#entries).length;
+	}
+
+	// Keep the `max` most-recently-touched entries. Returns count evicted.
+	capByLru(max) {
+		const keys = Object.keys(this.#entries);
+		if (keys.length <= max) return 0;
+		keys.sort(
+			(a, b) => this.#entries[a].lastTouched - this.#entries[b].lastTouched,
+		);
+		const evict = keys.slice(0, keys.length - max);
+		for (const k of evict) delete this.#entries[k];
+		return evict.length;
+	}
+
+	toJSON() {
+		return this.#entries;
+	}
+}
 
 export async function ensureBotUserId(state, slack) {
 	if (state.botUserId) return state.botUserId;
@@ -369,7 +388,7 @@ export async function ensureChannels(state, slack) {
 		const res = await slack.call("conversations.list", params);
 		checkAuth(res);
 		if (!res.ok) throw new Error(`conversations.list failed: ${res.error}`);
-		for (const c of res.channels || []) {
+		for (const c of res.channels) {
 			if (c.is_member) channels.push({ id: c.id, name: c.name });
 		}
 		cursor = res.response_metadata?.next_cursor || "";
@@ -409,7 +428,7 @@ export async function discoverMatches(channels, owner, repo, num, slack) {
 				);
 				break;
 			}
-			for (const msg of res.messages || []) {
+			for (const msg of res.messages) {
 				if (
 					urlsFromMessage(msg).some((c) => matchesPullUrl(c, owner, repo, num))
 				) {
@@ -429,9 +448,9 @@ export async function reactToMatch(match, ctx) {
 	const { emoji, oppositeEmoji, botUserId, isRerun, slack } = ctx;
 	const where = `${match.channel}/${match.ts}`;
 
-	// Approved↔changes-requested is the only flippable pair. When applying
-	// one, remove the other only if our own bot added it (never anyone else's).
-	// Skipped on re-runs so a stale replay can't reverse a real later state.
+	// approved↔changes-requested is the only flippable pair. Remove the
+	// opposite emoji only if our own bot put it there. Skipped on re-runs
+	// so a stale replay can't reverse a real later state.
 	if (!isRerun && oppositeEmoji) {
 		const got = await slack.call("reactions.get", {
 			channel: match.channel,
@@ -440,10 +459,8 @@ export async function reactToMatch(match, ctx) {
 		});
 		checkAuth(got);
 		if (got.ok) {
-			const opp = (got.message?.reactions || []).find(
-				(r) => r.name === oppositeEmoji,
-			);
-			if (opp?.users?.includes(botUserId)) {
+			const opp = got.message?.reactions?.find((r) => r.name === oppositeEmoji);
+			if (opp?.users.includes(botUserId)) {
 				const rm = await slack.call("reactions.remove", {
 					channel: match.channel,
 					timestamp: match.ts,
@@ -472,8 +489,6 @@ export async function reactToMatch(match, ctx) {
 	}
 	return { ok: !!add.ok, error: add.error };
 }
-
-// ---------------------------------------------------------------- main
 
 async function main() {
 	const eventPath = process.env.GITHUB_EVENT_PATH;
@@ -520,10 +535,11 @@ async function main() {
 
 	const slack = new SlackClient({ token });
 	const cache = new CacheClient();
-	const state = (await cache.restore()) || {};
-	state.prMatches = sweepStale(state.prMatches || {}, nowS() - PR_STALE_TTL_S);
+	const state = (await cache.restore()) ?? {};
+	const prMatches = new PrMatches(state.prMatches);
+	prMatches.sweepStale(nowS() - PR_STALE_TTL_S);
 
-	let matches = state.prMatches[prKey]?.matches;
+	let matches = prMatches.get(prKey);
 	if (!matches?.length) {
 		await ensureBotUserId(state, slack);
 		const channels = await ensureChannels(state, slack);
@@ -564,21 +580,16 @@ async function main() {
 		...overflow,
 	];
 
-	// Terminal events delete the entry; otherwise rewrite with bumped
-	// lastTouched so active PRs don't age out of the 90-day stale sweep.
+	// Terminal events delete the entry; otherwise rewrite (bumping lastTouched
+	// so active PRs don't age out of the 90-day stale sweep).
 	const isTerminal = status === STATUS_MERGED || status === STATUS_CLOSED;
-	const { [prKey]: _evicted, ...rest } = state.prMatches;
-	state.prMatches =
-		isTerminal || !survivors.length
-			? rest
-			: { ...rest, [prKey]: { matches: survivors, lastTouched: nowS() } };
+	if (isTerminal || !survivors.length) prMatches.delete(prKey);
+	else prMatches.set(prKey, survivors);
 
-	const beforeCap = state.prMatches;
-	state.prMatches = capByLru(state.prMatches, MAX_PR_ENTRIES);
-	const evicted =
-		Object.keys(beforeCap).length - Object.keys(state.prMatches).length;
+	const evicted = prMatches.capByLru(MAX_PR_ENTRIES);
 	if (evicted) console.warn(`pr-entries safety cap; evicted ${evicted}`);
 
+	state.prMatches = prMatches.toJSON();
 	const runId = process.env.GITHUB_RUN_ID || "norunid";
 	const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
 	await cache.save(state, `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`);
@@ -586,8 +597,6 @@ async function main() {
 
 if (import.meta.main) {
 	main().catch((e) => {
-		// AuthError → exit 0 with operator-facing message; everything else
-		// → exit 1 with a stack trace.
 		if (e instanceof AuthError) {
 			console.error(e.message);
 			return;
