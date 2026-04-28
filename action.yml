@@ -17,5 +17,5 @@ inputs:
     required: false
     description: Emoji name to react with on PR close-without-merge.
 runs:
-  using: node20
+  using: node24
   main: index.js

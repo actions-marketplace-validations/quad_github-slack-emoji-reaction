@@ -27,7 +27,7 @@ esac
 
 echo "==> running act with event=$EVENT_NAME payload=$PAYLOAD"
 
-act "$EVENT_NAME" \
+mise exec -- act "$EVENT_NAME" \
   -W .github/workflows/integration-act.yml \
   -e "$PAYLOAD" \
   -s SLACK_TOKEN=xoxb-fake-token-for-integration-tests \

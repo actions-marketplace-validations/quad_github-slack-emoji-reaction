@@ -651,8 +651,7 @@ export const _test = {
 	},
 };
 
-// Run main only when invoked as the action's entrypoint, not when imported.
-if (process.argv[1] && import.meta.filename === process.argv[1]) {
+if (import.meta.main) {
 	main().catch((e) => {
 		err(e?.stack || String(e));
 		process.exit(1);

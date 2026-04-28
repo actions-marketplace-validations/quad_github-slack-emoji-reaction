@@ -136,7 +136,7 @@ For verbose Slack call logging, re-run the workflow with the secret
 ## Development
 
 ```sh
-mise install              # node 20 from mise.toml
+mise install              # node 24 + act from mise.toml
 node --test               # unit tests
 
 # Integration tests via nektos/act (requires Docker).
