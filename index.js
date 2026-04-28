@@ -124,9 +124,7 @@ export function prContext(payload) {
 
 export class AuthError extends Error {
 	constructor(code) {
-		super(
-			`Slack auth error: ${code} — exiting cleanly. Refresh the SLACK_TOKEN secret.`,
-		);
+		super(`Slack auth error: ${code}. Refresh the SLACK_TOKEN secret.`);
 		this.code = code;
 	}
 }
@@ -496,14 +494,14 @@ async function main() {
 		console.error(
 			"GITHUB_EVENT_PATH not set; not running inside GitHub Actions",
 		);
-		return;
+		process.exit(1);
 	}
 	const eventName = process.env.GITHUB_EVENT_NAME;
 	if (!eventName) {
 		console.error(
 			"GITHUB_EVENT_NAME not set; not running inside GitHub Actions",
 		);
-		return;
+		process.exit(1);
 	}
 	const payload = JSON.parse(fs.readFileSync(eventPath, "utf8"));
 
@@ -518,14 +516,14 @@ async function main() {
 		// Fork PRs run with empty secrets by design — that's not a misconfig.
 		if (payload.pull_request?.head?.repo?.fork) return;
 		console.error("slack-token is missing; set the SLACK_TOKEN secret");
-		return;
+		process.exit(1);
 	}
 	console.log(`::add-mask::${token}`);
 
 	const prCtx = prContext(payload);
 	if (!prCtx) {
 		console.error("could not derive PR context from payload");
-		return;
+		process.exit(1);
 	}
 	const prKey = `${prCtx.owner}/${prCtx.repo}#${prCtx.num}`;
 
@@ -597,11 +595,11 @@ async function main() {
 
 if (import.meta.main) {
 	main().catch((e) => {
-		if (e instanceof AuthError) {
-			console.error(e.message);
-			return;
-		}
-		console.error(e?.stack || String(e));
+		// AuthError is operator-facing: print just the message, no stack.
+		// Everything else propagates to Node's default unhandled-rejection
+		// handler (which prints the stack and exits non-zero).
+		if (!(e instanceof AuthError)) throw e;
+		console.error(e.message);
 		process.exit(1);
 	});
 }
