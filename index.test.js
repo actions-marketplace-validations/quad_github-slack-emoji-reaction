@@ -24,15 +24,16 @@ const {
 // ============================================================ static helpers
 
 // Authoritative payloads vendored from octokit/webhooks; see fixtures/SOURCE.md.
-const upstream = (rel) =>
-	JSON.parse(
-		fs.readFileSync(
-			path.join(import.meta.dirname, "fixtures", "upstream", rel),
-			"utf8",
-		),
-	);
+// Parsed once per file, structuredClone'd at each call so tests can mutate freely.
+const fixtureCache = new Map();
+const upstream = (rel) => {
+	if (!fixtureCache.has(rel)) {
+		const p = path.join(import.meta.dirname, "fixtures", "upstream", rel);
+		fixtureCache.set(rel, JSON.parse(fs.readFileSync(p, "utf8")));
+	}
+	return structuredClone(fixtureCache.get(rel));
+};
 
-// Variant builder: deep-clone the upstream payload, apply a single-field patch.
 const variant = (rel, patch) => {
 	const p = upstream(rel);
 	for (const key of Object.keys(patch)) {
@@ -311,6 +312,16 @@ function shimFetch(scripts) {
 }
 
 test.beforeEach(() => _test.reset());
+
+const ctx = (overrides) => ({
+	status: "merged",
+	emoji: "eyes",
+	oppositeEmoji: null,
+	botUserId: null,
+	isRerun: false,
+	token: "xoxb",
+	...overrides,
+});
 
 // ---------------------------------------------------------------- slackCall
 
@@ -608,14 +619,12 @@ test("reactToMatch: approved with our bot owning a stale changes-requested remov
 	_test.setFetch(impl);
 	const result = await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
-		{
+		ctx({
 			status: "approved",
 			emoji: "white_check_mark",
 			oppositeEmoji: "warning",
 			botUserId: "U0BOT",
-			isRerun: false,
-			token: "xoxb",
-		},
+		}),
 	);
 	assert.equal(result.ok, true);
 	assert.deepEqual(
@@ -642,14 +651,12 @@ test("reactToMatch: approved without our bot in the warning users array does NOT
 	_test.setFetch(impl);
 	await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
-		{
+		ctx({
 			status: "approved",
 			emoji: "white_check_mark",
 			oppositeEmoji: "warning",
 			botUserId: "U0BOT",
-			isRerun: false,
-			token: "xoxb",
-		},
+		}),
 	);
 	// No reactions.remove call.
 	assert.deepEqual(
@@ -666,14 +673,13 @@ test("reactToMatch: when isRerun=true, skips the entire flip-cleanup branch (re-
 	_test.setFetch(impl);
 	await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
-		{
+		ctx({
 			status: "approved",
 			emoji: "white_check_mark",
 			oppositeEmoji: "warning",
 			botUserId: "U0BOT",
 			isRerun: true,
-			token: "xoxb",
-		},
+		}),
 	);
 	// No reactions.get, no reactions.remove. Just the additive add.
 	assert.deepEqual(
@@ -691,14 +697,7 @@ test("reactToMatch: tolerated reaction errors (already_reacted) do not throw", a
 	// No oppositeEmoji passed so flip cleanup is skipped.
 	const result = await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
-		{
-			status: "merged",
-			emoji: "large_purple_square",
-			oppositeEmoji: null,
-			botUserId: null,
-			isRerun: false,
-			token: "xoxb",
-		},
+		ctx({ emoji: "large_purple_square" }),
 	);
 	assert.equal(result.error, "already_reacted");
 });
@@ -711,14 +710,7 @@ test("reactToMatch: stale-match errors (channel_not_found) surface so caller can
 	_test.setFetch(impl);
 	const result = await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
-		{
-			status: "merged",
-			emoji: "large_purple_square",
-			oppositeEmoji: null,
-			botUserId: null,
-			isRerun: false,
-			token: "xoxb",
-		},
+		ctx({ emoji: "large_purple_square" }),
 	);
 	assert.equal(result.error, "channel_not_found");
 });
@@ -730,17 +722,7 @@ test("reactToMatch: invalid_auth on reactions.add propagates as AuthError", asyn
 	});
 	_test.setFetch(impl);
 	await assert.rejects(
-		reactToMatch(
-			{ channel: "C1", ts: "1.0" },
-			{
-				status: "merged",
-				emoji: "eyes",
-				oppositeEmoji: null,
-				botUserId: null,
-				isRerun: false,
-				token: "xoxb",
-			},
-		),
+		reactToMatch({ channel: "C1", ts: "1.0" }, ctx({})),
 		(e) => e instanceof AuthError && e.code === "invalid_auth",
 	);
 });

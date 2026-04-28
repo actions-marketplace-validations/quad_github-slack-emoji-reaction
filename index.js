@@ -57,10 +57,6 @@ const nowS = () => Math.floor(Date.now() / 1000);
 // GHA preserves hyphens in INPUT_* env vars (only spaces become underscores).
 const input = (name) => process.env[`INPUT_${name.toUpperCase()}`] || "";
 
-function maskSecret(s) {
-	if (s) console.log(`::add-mask::${s}`);
-}
-
 class AuthError extends Error {
 	constructor(code) {
 		super(code);
@@ -152,11 +148,7 @@ function tokenizeAngles(text) {
 function walkForUrls(node, out) {
 	if (!node || typeof node !== "object") return;
 	if (typeof node.url === "string") out.push(node.url);
-	for (const k of Object.keys(node)) {
-		const v = node[k];
-		if (Array.isArray(v)) for (const item of v) walkForUrls(item, out);
-		else if (v && typeof v === "object") walkForUrls(v, out);
-	}
+	for (const v of Object.values(node)) walkForUrls(v, out);
 }
 
 function urlsFromMessage(message) {
@@ -411,7 +403,7 @@ async function cacheRestore() {
 			warn(`cache blob fetch status ${blob.status}`);
 			return null;
 		}
-		const state = JSON.parse(await blob.text());
+		const state = await blob.json();
 		log(`cache: restored ${meta.cacheKey}`);
 		return state;
 	} catch (e) {
@@ -477,7 +469,7 @@ async function main() {
 		log("slack-token empty; skipping");
 		return;
 	}
-	maskSecret(token);
+	console.log(`::add-mask::${token}`);
 
 	const eventPath = process.env.GITHUB_EVENT_PATH;
 	const eventName = process.env.GITHUB_EVENT_NAME;
@@ -558,13 +550,15 @@ async function main() {
 			status,
 			emoji,
 			oppositeEmoji,
-			botUserId: state.botUserId, // populated above when discovery ran; null on cache hit
+			botUserId: state.botUserId,
 			isRerun,
 			token,
 		};
-		// Cache-hit + flip-cleanup needs botUserId; ensure once here.
-		if (oppositeEmoji && !isRerun && matches.length && !reactCtx.botUserId) {
+		const needsBotIdForFlip =
+			oppositeEmoji && !isRerun && matches.length && !reactCtx.botUserId;
+		if (needsBotIdForFlip) {
 			reactCtx.botUserId = await ensureBotUserId(state, token);
+			dirty = true;
 		}
 
 		const survivors = [];
@@ -581,7 +575,9 @@ async function main() {
 			if (!STALE_MATCH_ERRORS.has(result.error)) survivors.push(m);
 		}
 
-		const before = JSON.stringify(state.prMatches[prKey] ?? null);
+		// Reaction loop always touches the entry (delete on terminal, rewrite
+		// with bumped lastTouched on continuing). Mark dirty unconditionally.
+		dirty = true;
 		if (status === STATUS_MERGED || status === STATUS_CLOSED) {
 			delete state.prMatches[prKey];
 		} else if (survivors.length) {
@@ -589,8 +585,6 @@ async function main() {
 		} else {
 			delete state.prMatches[prKey];
 		}
-		const after = JSON.stringify(state.prMatches[prKey] ?? null);
-		if (before !== after) dirty = true;
 
 		const keys = Object.keys(state.prMatches);
 		if (keys.length > MAX_PR_ENTRIES) {
@@ -623,17 +617,13 @@ async function main() {
 	await cacheSave(state, `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`);
 }
 
-// Public: pure helpers and the AuthError. Anything that mutates module state
-// or makes network calls lives behind `_test` so the surface stays clean.
+// Network calls and module-state mutators live behind `_test` so the
+// public surface stays just the pure helpers + AuthError.
 export {
-	AUTH_ERRORS,
 	AuthError,
 	deriveStatus,
-	FLIP_OPPOSITE,
 	matchesPullUrl,
 	prContext,
-	STALE_MATCH_ERRORS,
-	TOLERATED_REACTION_ERRORS,
 	tokenizeAngles,
 	urlsFromMessage,
 };
