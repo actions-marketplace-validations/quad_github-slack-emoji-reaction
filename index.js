@@ -567,9 +567,12 @@ async function findMatches(slack, memo, prMatches, job) {
 	return discoverMatches(slack, job.pr, channels);
 }
 
-// React to as many matches as the per-run cap allows; carry the rest over
-// in the cache so the next event for this PR picks them up.
-async function applyReactions(slack, memo, job, matches) {
+// React to as many matches as the per-run cap allows, keeping prMatches
+// in sync per iteration so a mid-loop throw doesn't lose discovered work
+// or leave a terminal PR's entry stranded.
+async function applyReactions(slack, memo, prMatches, job, matches) {
+	const isTerminal =
+		job.status === STATUS_MERGED || job.status === STATUS_CLOSED;
 	const needsFlipCleanup = job.removeEmoji && !job.isRerun && matches.length;
 	const ctx = {
 		addEmoji: job.addEmoji,
@@ -591,21 +594,22 @@ async function applyReactions(slack, memo, job, matches) {
 		);
 	}
 
-	const reacted = [];
-	for (const m of toReact) reacted.push([m, await reactToMatch(ctx, m)]);
-	return [
-		...reacted.filter(([, r]) => keepsMatch(r)).map(([m]) => m),
-		...overflow,
-	];
-}
+	// Persist the full set up-front so an early throw still leaves the
+	// discovered matches in cache for the next run to retry.
+	let alive = [...toReact, ...overflow];
+	prMatches.set(job.prKey, alive);
 
-// Terminal events delete the entry; otherwise rewrite (bumping lastTouched
-// so active PRs don't age out of the 90-day stale sweep).
-function finalizeMatches(prMatches, job, survivors) {
-	const isTerminal =
-		job.status === STATUS_MERGED || job.status === STATUS_CLOSED;
-	if (isTerminal || !survivors.length) prMatches.delete(job.prKey);
-	else prMatches.set(job.prKey, survivors);
+	for (const m of toReact) {
+		const result = await reactToMatch(ctx, m);
+		if (!keepsMatch(result)) {
+			alive = alive.filter((x) => x !== m);
+			prMatches.set(job.prKey, alive);
+		}
+	}
+
+	// Clean completion: terminal events drop the entry entirely; non-terminal
+	// runs that left nothing alive also drop (next event re-discovers).
+	if (isTerminal || !alive.length) prMatches.delete(job.prKey);
 }
 
 async function main() {
@@ -626,8 +630,7 @@ async function main() {
 	try {
 		prMatches.sweepStale(nowS() - PR_STALE_TTL_S);
 		const matches = await findMatches(slack, memo, prMatches, job);
-		const survivors = await applyReactions(slack, memo, job, matches);
-		finalizeMatches(prMatches, job, survivors);
+		await applyReactions(slack, memo, prMatches, job, matches);
 	} finally {
 		const evicted = prMatches.capByLru(MAX_PR_ENTRIES);
 		if (evicted) console.warn(`pr-entries safety cap; evicted ${evicted}`);
