@@ -146,23 +146,32 @@ function checkAuth(res) {
 export class SlackClient {
 	#token;
 	#fetch;
+	#apiBase;
 	#paceMs;
+	#maxRetries;
+	#retryAfterCapS;
 	#lastCallAt = 0;
 
 	constructor({
 		token,
 		fetch = globalThis.fetch,
+		apiBase = SLACK_API,
 		paceMs = SLACK_PACE_MS,
+		maxRetries = MAX_RETRIES,
+		retryAfterCapS = RETRY_AFTER_CAP_S,
 	} = {}) {
 		this.#token = token;
 		this.#fetch = fetch;
+		this.#apiBase = apiBase;
 		this.#paceMs = paceMs;
+		this.#maxRetries = maxRetries;
+		this.#retryAfterCapS = retryAfterCapS;
 	}
 
 	async call(method, params) {
-		const url = SLACK_API + method;
+		const url = this.#apiBase + method;
 		let lastBody;
-		for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+		for (let attempt = 0; attempt <= this.#maxRetries; attempt++) {
 			const wait = this.#paceMs - (Date.now() - this.#lastCallAt);
 			if (wait > 0) await sleep(wait);
 			this.#lastCallAt = Date.now();
@@ -180,9 +189,9 @@ export class SlackClient {
 				lastBody = await res.json();
 			} catch (e) {
 				console.warn(
-					`slack ${method} network error: ${e.message} (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
+					`slack ${method} network error: ${e.message} (attempt ${attempt + 1}/${this.#maxRetries + 1})`,
 				);
-				if (attempt >= MAX_RETRIES)
+				if (attempt >= this.#maxRetries)
 					return { ok: false, error: "network_error" };
 				await sleep(1000);
 				continue;
@@ -197,12 +206,12 @@ export class SlackClient {
 
 			const retry = Math.min(
 				parseInt(res.headers.get("retry-after"), 10) || 1,
-				RETRY_AFTER_CAP_S,
+				this.#retryAfterCapS,
 			);
 			console.warn(
-				`slack ${method} ratelimited; retry-after ${retry}s (attempt ${attempt + 1}/${MAX_RETRIES + 1})`,
+				`slack ${method} ratelimited; retry-after ${retry}s (attempt ${attempt + 1}/${this.#maxRetries + 1})`,
 			);
-			if (attempt >= MAX_RETRIES) break;
+			if (attempt >= this.#maxRetries) break;
 			await sleep(retry * 1000);
 		}
 		return lastBody;
