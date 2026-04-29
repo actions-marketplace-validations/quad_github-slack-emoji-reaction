@@ -635,10 +635,7 @@ async function main() {
 
 	const runId = process.env.GITHUB_RUN_ID || "norunid";
 	const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
-	await cache.save(
-		{ memo: memo.toJSON(), prMatches: prMatches.toJSON() },
-		`${runId}-${runAttempt}`,
-	);
+	await cache.save({ memo, prMatches }, `${runId}-${runAttempt}`);
 }
 
 if (import.meta.main) {
