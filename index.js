@@ -375,7 +375,7 @@ export class PrMatches {
 	}
 }
 
-export async function ensureBotUserId(state, slack) {
+export async function ensureBotUserId(slack, state) {
 	if (state.botUserId) return state.botUserId;
 	const res = await slack.call("auth.test", {});
 	checkAuth(res);
@@ -384,7 +384,7 @@ export async function ensureBotUserId(state, slack) {
 	return state.botUserId;
 }
 
-export async function ensureChannels(state, slack) {
+export async function ensureChannels(slack, state) {
 	const fresh =
 		state.channels &&
 		state.channelsRefreshedAt &&
@@ -414,7 +414,7 @@ export async function ensureChannels(state, slack) {
 	return channels;
 }
 
-export async function discoverMatches(channels, pr, slack) {
+export async function discoverMatches(slack, pr, channels) {
 	const matches = [];
 	const oldest = String(nowS() - HISTORY_LOOKBACK_S);
 	let scanned = 0;
@@ -544,17 +544,17 @@ function readJob() {
 	};
 }
 
-async function findMatches(prMatches, job, state, slack) {
+async function findMatches(slack, state, prMatches, job) {
 	const cached = prMatches.get(job.prKey);
 	if (cached?.length) return cached;
-	await ensureBotUserId(state, slack);
-	const channels = await ensureChannels(state, slack);
-	return discoverMatches(channels, job.pr, slack);
+	await ensureBotUserId(slack, state);
+	const channels = await ensureChannels(slack, state);
+	return discoverMatches(slack, job.pr, channels);
 }
 
 // React to as many matches as the per-run cap allows; carry the rest over
 // in the cache so the next event for this PR picks them up.
-async function applyReactions(matches, job, state, slack) {
+async function applyReactions(slack, state, job, matches) {
 	const ctx = {
 		addEmoji: job.addEmoji,
 		removeEmoji: job.removeEmoji,
@@ -563,7 +563,7 @@ async function applyReactions(matches, job, state, slack) {
 		slack,
 	};
 	if (job.removeEmoji && !job.isRerun && matches.length && !ctx.botUserId) {
-		ctx.botUserId = await ensureBotUserId(state, slack);
+		ctx.botUserId = await ensureBotUserId(slack, state);
 	}
 
 	const toReact = matches.slice(0, REACTIONS_PER_RUN_CAP);
@@ -605,8 +605,8 @@ async function main() {
 	const prMatches = new PrMatches(state.prMatches);
 	prMatches.sweepStale(nowS() - PR_STALE_TTL_S);
 
-	const matches = await findMatches(prMatches, job, state, slack);
-	const survivors = await applyReactions(matches, job, state, slack);
+	const matches = await findMatches(slack, state, prMatches, job);
+	const survivors = await applyReactions(slack, state, job, matches);
 	finalizeMatches(prMatches, job, survivors);
 
 	state.prMatches = prMatches.toJSON();

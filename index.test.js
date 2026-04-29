@@ -366,7 +366,7 @@ test("ensureChannels: paginates conversations.list and filters to is_member", as
 		],
 	});
 	const state = {};
-	const channels = await ensureChannels(state, slack);
+	const channels = await ensureChannels(slack, state);
 	assert.deepEqual(
 		channels.map((c) => c.id),
 		["C1", "C3"],
@@ -381,7 +381,7 @@ test("ensureChannels: returns cached list when within TTL", async () => {
 		channels: [{ id: "C1", name: "general" }],
 		channelsRefreshedAt: Math.floor(Date.now() / 1000) - 60,
 	};
-	const channels = await ensureChannels(state, slack);
+	const channels = await ensureChannels(slack, state);
 	assert.equal(channels.length, 1);
 	assert.equal(calls.length, 0);
 });
@@ -407,9 +407,9 @@ test("discoverMatches: scans history of every member channel for the PR URL", as
 		{ id: "C2", name: "b" },
 	];
 	const matches = await discoverMatches(
-		channels,
-		{ owner: "octo", repo: "hello", num: 42 },
 		slack,
+		{ owner: "octo", repo: "hello", num: 42 },
+		channels,
 	);
 	assert.deepEqual(matches, [{ channel: "C1", ts: "1.001" }]);
 	assert.equal(calls.length, 2);
@@ -426,7 +426,7 @@ test("discoverMatches: respects 100-channel cap", async () => {
 			body: { ok: true, messages: [], has_more: false },
 		})),
 	});
-	await discoverMatches(channels, { owner: "o", repo: "r", num: 1 }, slack);
+	await discoverMatches(slack, { owner: "o", repo: "r", num: 1 }, channels);
 	assert.equal(calls.length, 100);
 });
 
@@ -447,11 +447,9 @@ test("discoverMatches: paginates conversations.history up to 3 pages, then stops
 			page("", false),
 		],
 	});
-	await discoverMatches(
-		[{ id: "C1", name: "x" }],
-		{ owner: "o", repo: "r", num: 1 },
-		slack,
-	);
+	await discoverMatches(slack, { owner: "o", repo: "r", num: 1 }, [
+		{ id: "C1", name: "x" },
+	]);
 	assert.equal(calls.length, 3);
 });
 
@@ -478,9 +476,9 @@ test("discoverMatches: extracts PR URL from blocks even when text is empty", asy
 		],
 	});
 	const matches = await discoverMatches(
-		[{ id: "C1", name: "x" }],
-		{ owner: "octo", repo: "hello", num: 42 },
 		slack,
+		{ owner: "octo", repo: "hello", num: 42 },
+		[{ id: "C1", name: "x" }],
 	);
 	assert.deepEqual(matches, [{ channel: "C1", ts: "1.5" }]);
 });
@@ -492,8 +490,8 @@ test("ensureBotUserId: caches the bot user id and skips auth.test on second call
 		"auth.test": [{ body: { ok: true, user_id: "U0BOT" } }],
 	});
 	const state = {};
-	await ensureBotUserId(state, slack);
-	await ensureBotUserId(state, slack);
+	await ensureBotUserId(slack, state);
+	await ensureBotUserId(slack, state);
 	assert.equal(state.botUserId, "U0BOT");
 	assert.equal(calls.length, 1);
 });
@@ -503,7 +501,7 @@ test("ensureBotUserId: throws AuthError on invalid_auth (so caller can clean-exi
 		"auth.test": [{ body: { ok: false, error: "invalid_auth" } }],
 	});
 	await assert.rejects(
-		ensureBotUserId({}, slack),
+		ensureBotUserId(slack, {}),
 		(e) => e instanceof AuthError && e.code === "invalid_auth",
 	);
 });
