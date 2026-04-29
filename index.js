@@ -342,32 +342,32 @@ export class PrMatches {
 	}
 
 	get(key) {
-		return this.#entries[key]?.matches;
+		return this.#entries[key]?.value;
 	}
 
-	set(key, matches) {
-		this.#entries[key] = { matches, lastTouched: nowS() };
+	set(key, value) {
+		this.#entries[key] = { value, refreshedAt: nowS() };
 	}
 
 	delete(key) {
 		delete this.#entries[key];
 	}
 
-	// Evict entries last touched before `cutoffS`. Returns count removed.
+	// Evict entries last refreshed before `cutoffS`. Returns count removed.
 	sweepStale(cutoffS) {
 		const before = Object.keys(this.#entries).length;
 		this.#entries = Object.fromEntries(
-			Object.entries(this.#entries).filter(([, v]) => v.lastTouched >= cutoffS),
+			Object.entries(this.#entries).filter(([, v]) => v.refreshedAt >= cutoffS),
 		);
 		return before - Object.keys(this.#entries).length;
 	}
 
-	// Keep the most-recently-touched #max entries. Returns count evicted.
+	// Keep the most-recently-refreshed #max entries. Returns count evicted.
 	capByLru() {
 		const keys = Object.keys(this.#entries);
 		if (keys.length <= this.#max) return 0;
 		keys.sort(
-			(a, b) => this.#entries[a].lastTouched - this.#entries[b].lastTouched,
+			(a, b) => this.#entries[a].refreshedAt - this.#entries[b].refreshedAt,
 		);
 		const evict = keys.slice(0, keys.length - this.#max);
 		for (const k of evict) delete this.#entries[k];
