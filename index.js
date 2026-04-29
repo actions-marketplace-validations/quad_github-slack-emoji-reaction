@@ -34,7 +34,6 @@ const AUTH_ERRORS = new Set([
 const BOT_USER_ID_TTL_S = 30 * 24 * 3600;
 const CHANNEL_LIST_TTL_S = 24 * 3600;
 const PR_STALE_TTL_S = 90 * 24 * 3600;
-const MAX_PR_ENTRIES = 10000;
 const MAX_CHANNELS_PER_RUN = 100;
 const HISTORY_PAGES_PER_CHANNEL = 3;
 const HISTORY_LOOKBACK_S = 30 * 24 * 3600;
@@ -218,6 +217,7 @@ export class CacheClient {
 	#enabled;
 	#keyPrefix;
 	#version;
+	#runKey;
 
 	constructor({
 		env = process.env,
@@ -236,6 +236,7 @@ export class CacheClient {
 		this.#enabled = !!this.#base && !!this.#token;
 		this.#keyPrefix = keyPrefix;
 		this.#version = version;
+		this.#runKey = `${env.GITHUB_RUN_ID || "norunid"}-${env.GITHUB_RUN_ATTEMPT || "1"}`;
 	}
 
 	#url(path) {
@@ -280,7 +281,7 @@ export class CacheClient {
 		}
 	}
 
-	async save(state, suffix) {
+	async save(state) {
 		if (!this.#enabled) return;
 		try {
 			const body = Buffer.from(JSON.stringify(state), "utf8");
@@ -289,7 +290,7 @@ export class CacheClient {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
-					key: `${this.#keyPrefix}${suffix}`,
+					key: `${this.#keyPrefix}${this.#runKey}`,
 					version: this.#version,
 					cacheSize: body.length,
 				}),
@@ -333,9 +334,11 @@ export class CacheClient {
 // so callers don't reach into the entries' shape directly.
 export class PrMatches {
 	#entries;
+	#max;
 
-	constructor(entries = {}) {
+	constructor(entries = {}, { max = 10000 } = {}) {
 		this.#entries = entries;
+		this.#max = max;
 	}
 
 	get(key) {
@@ -359,14 +362,14 @@ export class PrMatches {
 		return before - Object.keys(this.#entries).length;
 	}
 
-	// Keep the `max` most-recently-touched entries. Returns count evicted.
-	capByLru(max) {
+	// Keep the most-recently-touched #max entries. Returns count evicted.
+	capByLru() {
 		const keys = Object.keys(this.#entries);
-		if (keys.length <= max) return 0;
+		if (keys.length <= this.#max) return 0;
 		keys.sort(
 			(a, b) => this.#entries[a].lastTouched - this.#entries[b].lastTouched,
 		);
-		const evict = keys.slice(0, keys.length - max);
+		const evict = keys.slice(0, keys.length - this.#max);
 		for (const k of evict) delete this.#entries[k];
 		return evict.length;
 	}
@@ -630,12 +633,10 @@ async function main() {
 	const survivors = await applyReactions(slack, memo, job, matches);
 	finalizeMatches(prMatches, job, survivors);
 
-	const evicted = prMatches.capByLru(MAX_PR_ENTRIES);
+	const evicted = prMatches.capByLru();
 	if (evicted) console.warn(`pr-entries safety cap; evicted ${evicted}`);
 
-	const runId = process.env.GITHUB_RUN_ID || "norunid";
-	const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
-	await cache.save({ memo, prMatches }, `${runId}-${runAttempt}`);
+	await cache.save({ memo, prMatches });
 }
 
 if (import.meta.main) {
