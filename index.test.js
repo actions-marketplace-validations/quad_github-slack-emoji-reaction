@@ -377,20 +377,20 @@ test("fetchChannels: paginates conversations.list and filters to is_member", asy
 
 // ---------------------------------------------------------------- Memo
 
-test("Memo.get: caches first call, skips fetcher on subsequent calls within TTL", async () => {
+test("Memo.ensure: caches first call, skips fetcher on subsequent calls within TTL", async () => {
 	const memo = new Memo();
 	let calls = 0;
 	const fetcher = async () => ++calls;
-	assert.equal(await memo.get("k", 60, fetcher), 1);
-	assert.equal(await memo.get("k", 60, fetcher), 1);
+	assert.equal(await memo.ensure("k", 60, fetcher), 1);
+	assert.equal(await memo.ensure("k", 60, fetcher), 1);
 	assert.equal(calls, 1);
 });
 
-test("Memo.get: refetches once the cell's age exceeds the TTL", async () => {
+test("Memo.ensure: refetches once the cell's age exceeds the TTL", async () => {
 	// Seed a stale cell (refreshedAt 1h ago, TTL 60s).
 	const stale = Math.floor(Date.now() / 1000) - 3600;
 	const memo = new Memo({ k: { value: "old", refreshedAt: stale } });
-	const result = await memo.get("k", 60, async () => "fresh");
+	const result = await memo.ensure("k", 60, async () => "fresh");
 	assert.equal(result, "fresh");
 });
 

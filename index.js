@@ -329,79 +329,86 @@ export class CacheClient {
 	}
 }
 
-// Per-PR cache map: { "owner/repo#num" → { matches, lastTouched } }.
-// Encapsulates the lifecycle (read/write/delete + stale-sweep + LRU cap)
-// so callers don't reach into the entries' shape directly.
-export class PrMatches {
-	#entries;
+// Keyed map of { value, refreshedAt } cells. Shared base for any keyed
+// store that needs TTL-aware reads, stale-sweep, and LRU cap.
+export class Cells {
+	#cells;
 	#max;
 
-	constructor(entries = {}, { max = 10000 } = {}) {
-		this.#entries = entries;
+	constructor(cells = {}, { max = Infinity } = {}) {
+		this.#cells = cells;
 		this.#max = max;
 	}
 
 	get(key) {
-		return this.#entries[key]?.value;
+		return this.#cells[key]?.value;
 	}
 
 	set(key, value) {
-		this.#entries[key] = { value, refreshedAt: nowS() };
+		this.#cells[key] = { value, refreshedAt: nowS() };
 	}
 
 	delete(key) {
-		delete this.#entries[key];
+		delete this.#cells[key];
+	}
+
+	// Seconds since the cell was last refreshed; Infinity if absent.
+	ageS(key) {
+		const cell = this.#cells[key];
+		return cell ? nowS() - cell.refreshedAt : Infinity;
 	}
 
 	// Evict entries last refreshed before `cutoffS`. Returns count removed.
 	sweepStale(cutoffS) {
-		const before = Object.keys(this.#entries).length;
-		this.#entries = Object.fromEntries(
-			Object.entries(this.#entries).filter(([, v]) => v.refreshedAt >= cutoffS),
+		const before = Object.keys(this.#cells).length;
+		this.#cells = Object.fromEntries(
+			Object.entries(this.#cells).filter(([, v]) => v.refreshedAt >= cutoffS),
 		);
-		return before - Object.keys(this.#entries).length;
+		return before - Object.keys(this.#cells).length;
 	}
 
 	// Keep the most-recently-refreshed #max entries. Returns count evicted.
 	capByLru() {
-		const keys = Object.keys(this.#entries);
+		const keys = Object.keys(this.#cells);
 		if (keys.length <= this.#max) return 0;
 		keys.sort(
-			(a, b) => this.#entries[a].refreshedAt - this.#entries[b].refreshedAt,
+			(a, b) => this.#cells[a].refreshedAt - this.#cells[b].refreshedAt,
 		);
 		const evict = keys.slice(0, keys.length - this.#max);
-		for (const k of evict) delete this.#entries[k];
+		for (const k of evict) delete this.#cells[k];
 		return evict.length;
 	}
 
 	toJSON() {
-		return this.#entries;
+		return this.#cells;
 	}
 }
 
-// TTL-keyed memoized cache. `get(key, ttlS, fetcher)` returns the cached
-// value if fresh, otherwise runs the fetcher and writes back. Cell shape is
-// { value, refreshedAt } — uniform per cell, so any I/O can be cached the
-// same way.
+// TTL-keyed memoized cache. `ensure(key, ttlS, fetcher)` returns the cached
+// value if fresh, otherwise runs the fetcher and writes back.
 export class Memo {
 	#cells;
 
 	constructor(cells = {}) {
-		this.#cells = cells;
+		this.#cells = new Cells(cells);
 	}
 
-	async get(key, ttlS, fetcher) {
-		const cell = this.#cells[key];
-		if (cell?.value !== undefined && nowS() - cell.refreshedAt < ttlS) {
-			return cell.value;
-		}
+	async ensure(key, ttlS, fetcher) {
+		if (this.#cells.ageS(key) < ttlS) return this.#cells.get(key);
 		const value = await fetcher();
-		this.#cells[key] = { value, refreshedAt: nowS() };
+		this.#cells.set(key, value);
 		return value;
 	}
 
 	toJSON() {
 		return this.#cells;
+	}
+}
+
+// Per-PR cache map: { "owner/repo#num" → matches }.
+export class PrMatches extends Cells {
+	constructor(entries = {}) {
+		super(entries, { max: 10000 });
 	}
 }
 
@@ -569,7 +576,7 @@ function readJob() {
 async function findMatches(slack, memo, prMatches, job) {
 	const cached = prMatches.get(job.prKey);
 	if (cached?.length) return cached;
-	const channels = await memo.get("channels", CHANNEL_LIST_TTL_S, () =>
+	const channels = await memo.ensure("channels", CHANNEL_LIST_TTL_S, () =>
 		fetchChannels(slack),
 	);
 	return discoverMatches(slack, job.pr, channels);
@@ -585,7 +592,7 @@ async function applyReactions(slack, memo, job, matches) {
 		isRerun: job.isRerun,
 		slack,
 		botUserId: needsFlipCleanup
-			? await memo.get("botUserId", BOT_USER_ID_TTL_S, () =>
+			? await memo.ensure("botUserId", BOT_USER_ID_TTL_S, () =>
 					fetchBotUserId(slack),
 				)
 			: null,
