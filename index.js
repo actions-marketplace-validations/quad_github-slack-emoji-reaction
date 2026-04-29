@@ -41,8 +41,6 @@ const REACTIONS_PER_RUN_CAP = 50;
 const SLACK_PACE_MS = 1200;
 const RETRY_AFTER_CAP_S = 60;
 const MAX_RETRIES = 3;
-const CACHE_VERSION = "slack-emoji-reactions-v1";
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowS = () => Math.floor(Date.now() / 1000);
 
@@ -213,11 +211,13 @@ export class CacheClient {
 	#headers;
 	#enabled;
 	#keyPrefix;
+	#version;
 
 	constructor({
 		env = process.env,
 		fetch = globalThis.fetch,
 		keyPrefix = "slack-emoji-reactions-state-",
+		version = "slack-emoji-reactions-v1",
 	} = {}) {
 		const rawBase = env.ACTIONS_CACHE_URL || "";
 		this.#base = rawBase.endsWith("/") ? rawBase : rawBase ? `${rawBase}/` : "";
@@ -229,6 +229,7 @@ export class CacheClient {
 		};
 		this.#enabled = !!this.#base && !!this.#token;
 		this.#keyPrefix = keyPrefix;
+		this.#version = version;
 	}
 
 	#url(path) {
@@ -252,7 +253,7 @@ export class CacheClient {
 				"keys",
 				`${this.#keyPrefix}__sentinel__,${this.#keyPrefix}`,
 			);
-			lookup.searchParams.set("version", CACHE_VERSION);
+			lookup.searchParams.set("version", this.#version);
 			const res = await this.#fetch(lookup, { headers: this.#headers });
 			if (res.status === 204) return null;
 			if (!res.ok) {
@@ -283,7 +284,7 @@ export class CacheClient {
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
 					key: `${this.#keyPrefix}${suffix}`,
-					version: CACHE_VERSION,
+					version: this.#version,
 					cacheSize: body.length,
 				}),
 			});
