@@ -45,7 +45,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowS = () => Math.floor(Date.now() / 1000);
 
 // GHA preserves hyphens in INPUT_* env vars (only spaces become underscores).
-const input = (name) => process.env[`INPUT_${name.toUpperCase()}`] || "";
+const input = (name) =>
+	(process.env[`INPUT_${name.toUpperCase()}`] || "").trim();
 
 const keepsMatch = (result) => !STALE_MATCH_ERRORS.has(result.error);
 
@@ -557,10 +558,10 @@ function readJob() {
 
 	const status = deriveStatus(eventName, payload);
 	if (!status) return null;
-	const addEmoji = input(`emoji-${status}`).trim();
+	const addEmoji = input(`emoji-${status}`);
 	if (!addEmoji) return null;
 
-	const token = input("slack-token").trim();
+	const token = input("slack-token");
 	if (!token) {
 		// Fork PRs run with empty secrets by design — that's not a misconfig.
 		if (payload.pull_request?.head?.repo?.fork) return null;
@@ -575,7 +576,7 @@ function readJob() {
 		status,
 		token,
 		addEmoji,
-		removeEmoji: opposite ? input(`emoji-${opposite}`).trim() : "",
+		removeEmoji: opposite ? input(`emoji-${opposite}`) : "",
 		isRerun: parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) > 1,
 		pr,
 		prKey: `${pr.owner}/${pr.repo}#${pr.num}`,
