@@ -251,9 +251,8 @@ const slackFor = (scripts) => {
 };
 
 const ctx = (overrides) => ({
-	status: "merged",
-	emoji: "eyes",
-	oppositeEmoji: null,
+	addEmoji: "eyes",
+	removeEmoji: "",
 	botUserId: null,
 	isRerun: false,
 	...overrides,
@@ -405,7 +404,11 @@ test("discoverMatches: scans history of every member channel for the PR URL", as
 		{ id: "C1", name: "a" },
 		{ id: "C2", name: "b" },
 	];
-	const matches = await discoverMatches(channels, "octo", "hello", 42, slack);
+	const matches = await discoverMatches(
+		channels,
+		{ owner: "octo", repo: "hello", num: 42 },
+		slack,
+	);
 	assert.deepEqual(matches, [{ channel: "C1", ts: "1.001" }]);
 	assert.equal(calls.length, 2);
 	assert.ok(parseInt(calls[0].params.oldest, 10) > 0);
@@ -421,7 +424,7 @@ test("discoverMatches: respects 100-channel cap", async () => {
 			body: { ok: true, messages: [], has_more: false },
 		})),
 	});
-	await discoverMatches(channels, "o", "r", 1, slack);
+	await discoverMatches(channels, { owner: "o", repo: "r", num: 1 }, slack);
 	assert.equal(calls.length, 100);
 });
 
@@ -442,7 +445,11 @@ test("discoverMatches: paginates conversations.history up to 3 pages, then stops
 			page("", false),
 		],
 	});
-	await discoverMatches([{ id: "C1", name: "x" }], "o", "r", 1, slack);
+	await discoverMatches(
+		[{ id: "C1", name: "x" }],
+		{ owner: "o", repo: "r", num: 1 },
+		slack,
+	);
 	assert.equal(calls.length, 3);
 });
 
@@ -470,9 +477,7 @@ test("discoverMatches: extracts PR URL from blocks even when text is empty", asy
 	});
 	const matches = await discoverMatches(
 		[{ id: "C1", name: "x" }],
-		"octo",
-		"hello",
-		42,
+		{ owner: "octo", repo: "hello", num: 42 },
 		slack,
 	);
 	assert.deepEqual(matches, [{ channel: "C1", ts: "1.5" }]);
@@ -524,9 +529,8 @@ test("reactToMatch: approved with our bot owning a stale changes-requested remov
 		{ channel: "C1", ts: "1.0" },
 		ctx({
 			slack,
-			status: "approved",
-			emoji: "white_check_mark",
-			oppositeEmoji: "warning",
+			addEmoji: "white_check_mark",
+			removeEmoji: "warning",
 			botUserId: "U0BOT",
 		}),
 	);
@@ -555,9 +559,8 @@ test("reactToMatch: approved without our bot in the warning users array does NOT
 		{ channel: "C1", ts: "1.0" },
 		ctx({
 			slack,
-			status: "approved",
-			emoji: "white_check_mark",
-			oppositeEmoji: "warning",
+			addEmoji: "white_check_mark",
+			removeEmoji: "warning",
 			botUserId: "U0BOT",
 		}),
 	);
@@ -576,9 +579,8 @@ test("reactToMatch: when isRerun=true, skips the entire flip-cleanup branch (re-
 		{ channel: "C1", ts: "1.0" },
 		ctx({
 			slack,
-			status: "approved",
-			emoji: "white_check_mark",
-			oppositeEmoji: "warning",
+			addEmoji: "white_check_mark",
+			removeEmoji: "warning",
 			botUserId: "U0BOT",
 			isRerun: true,
 		}),
@@ -594,10 +596,10 @@ test("reactToMatch: tolerated reaction errors (already_reacted) do not throw", a
 	const { slack } = slackFor({
 		"reactions.add": [{ body: { ok: false, error: "already_reacted" } }],
 	});
-	// No oppositeEmoji passed so flip cleanup is skipped.
+	// No removeEmoji passed so flip cleanup is skipped.
 	const result = await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
-		ctx({ slack, emoji: "large_purple_square" }),
+		ctx({ slack, addEmoji: "large_purple_square" }),
 	);
 	assert.equal(result.error, "already_reacted");
 });
@@ -608,7 +610,7 @@ test("reactToMatch: stale-match errors (channel_not_found) surface so caller can
 	});
 	const result = await reactToMatch(
 		{ channel: "C1", ts: "1.0" },
-		ctx({ slack, emoji: "large_purple_square" }),
+		ctx({ slack, addEmoji: "large_purple_square" }),
 	);
 	assert.equal(result.error, "channel_not_found");
 });

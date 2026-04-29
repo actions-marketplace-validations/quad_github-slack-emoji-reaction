@@ -122,7 +122,13 @@ export function prContext(payload) {
 	return { owner, repo, num, prUrl: pr.html_url };
 }
 
-export class AuthError extends Error {
+// Thrown for any condition that should fail the workflow with an
+// operator-facing message but no stack trace. The entrypoint catches
+// and prints the message; everything else propagates to Node's default
+// unhandled-rejection handler (stack + non-zero exit).
+export class FatalError extends Error {}
+
+export class AuthError extends FatalError {
 	constructor(code) {
 		super(`Slack auth error: ${code}. Refresh the SLACK_TOKEN secret.`);
 		this.code = code;
@@ -397,7 +403,7 @@ export async function ensureChannels(state, slack) {
 	return channels;
 }
 
-export async function discoverMatches(channels, owner, repo, num, slack) {
+export async function discoverMatches(channels, pr, slack) {
 	const matches = [];
 	const oldest = String(nowS() - HISTORY_LOOKBACK_S);
 	let scanned = 0;
@@ -428,7 +434,9 @@ export async function discoverMatches(channels, owner, repo, num, slack) {
 			}
 			for (const msg of res.messages) {
 				if (
-					urlsFromMessage(msg).some((c) => matchesPullUrl(c, owner, repo, num))
+					urlsFromMessage(msg).some((c) =>
+						matchesPullUrl(c, pr.owner, pr.repo, pr.num),
+					)
 				) {
 					matches.push({ channel: ch.id, ts: msg.ts });
 					foundInChannel = true;
@@ -443,13 +451,13 @@ export async function discoverMatches(channels, owner, repo, num, slack) {
 }
 
 export async function reactToMatch(match, ctx) {
-	const { emoji, oppositeEmoji, botUserId, isRerun, slack } = ctx;
+	const { addEmoji, removeEmoji, botUserId, isRerun, slack } = ctx;
 	const where = `${match.channel}/${match.ts}`;
 
 	// approved↔changes-requested is the only flippable pair. Remove the
 	// opposite emoji only if our own bot put it there. Skipped on re-runs
 	// so a stale replay can't reverse a real later state.
-	if (!isRerun && oppositeEmoji) {
+	if (!isRerun && removeEmoji) {
 		const got = await slack.call("reactions.get", {
 			channel: match.channel,
 			timestamp: match.ts,
@@ -457,18 +465,16 @@ export async function reactToMatch(match, ctx) {
 		});
 		checkAuth(got);
 		if (got.ok) {
-			const opp = got.message?.reactions?.find((r) => r.name === oppositeEmoji);
+			const opp = got.message?.reactions?.find((r) => r.name === removeEmoji);
 			if (opp?.users.includes(botUserId)) {
 				const rm = await slack.call("reactions.remove", {
 					channel: match.channel,
 					timestamp: match.ts,
-					name: oppositeEmoji,
+					name: removeEmoji,
 				});
 				checkAuth(rm);
 				if (!rm.ok && !TOLERATED_REACTION_ERRORS.has(rm.error)) {
-					console.warn(
-						`reactions.remove ${where} ${oppositeEmoji}: ${rm.error}`,
-					);
+					console.warn(`reactions.remove ${where} ${removeEmoji}: ${rm.error}`);
 				}
 			}
 		} else if (!TOLERATED_REACTION_ERRORS.has(got.error)) {
@@ -479,58 +485,55 @@ export async function reactToMatch(match, ctx) {
 	const add = await slack.call("reactions.add", {
 		channel: match.channel,
 		timestamp: match.ts,
-		name: emoji,
+		name: addEmoji,
 	});
 	checkAuth(add);
 	if (!add.ok && !TOLERATED_REACTION_ERRORS.has(add.error)) {
-		console.warn(`reactions.add ${where} ${emoji}: ${add.error}`);
+		console.warn(`reactions.add ${where} ${addEmoji}: ${add.error}`);
 	}
 	return { ok: !!add.ok, error: add.error };
 }
 
-// Read env + payload into one of three tagged shapes:
-//   { error }  — operator-facing error; main returns it for exit 1.
-//   {}         — routine skip (unmapped event, no emoji, fork PR).
-//   { job }    — proceed with the work.
+// Read env + payload into a job spec. Throws FatalError on operator-fixable
+// problems; returns null on routine skips (unmapped event, unconfigured
+// emoji, fork PR with no secrets); otherwise returns the job to run.
 function readJob() {
 	const eventPath = process.env.GITHUB_EVENT_PATH;
 	if (!eventPath)
-		return {
-			error: "GITHUB_EVENT_PATH not set; not running inside GitHub Actions",
-		};
+		throw new FatalError(
+			"GITHUB_EVENT_PATH not set; not running inside GitHub Actions",
+		);
 	const eventName = process.env.GITHUB_EVENT_NAME;
 	if (!eventName)
-		return {
-			error: "GITHUB_EVENT_NAME not set; not running inside GitHub Actions",
-		};
+		throw new FatalError(
+			"GITHUB_EVENT_NAME not set; not running inside GitHub Actions",
+		);
 	const payload = JSON.parse(fs.readFileSync(eventPath, "utf8"));
 
 	const status = deriveStatus(eventName, payload);
-	if (!status) return {};
-	const emoji = input(`emoji-${status}`).trim();
-	if (!emoji) return {};
+	if (!status) return null;
+	const addEmoji = input(`emoji-${status}`).trim();
+	if (!addEmoji) return null;
 
 	const token = input("slack-token").trim();
 	if (!token) {
 		// Fork PRs run with empty secrets by design — that's not a misconfig.
-		if (payload.pull_request?.head?.repo?.fork) return {};
-		return { error: "slack-token is missing; set the SLACK_TOKEN secret" };
+		if (payload.pull_request?.head?.repo?.fork) return null;
+		throw new FatalError("slack-token is missing; set the SLACK_TOKEN secret");
 	}
 
-	const prCtx = prContext(payload);
-	if (!prCtx) return { error: "could not derive PR context from payload" };
+	const pr = prContext(payload);
+	if (!pr) throw new FatalError("could not derive PR context from payload");
 
 	const opposite = FLIP_OPPOSITE[status];
 	return {
-		job: {
-			status,
-			emoji,
-			token,
-			oppositeEmoji: opposite ? input(`emoji-${opposite}`).trim() : "",
-			isRerun: parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) > 1,
-			prCtx,
-			prKey: `${prCtx.owner}/${prCtx.repo}#${prCtx.num}`,
-		},
+		status,
+		token,
+		addEmoji,
+		removeEmoji: opposite ? input(`emoji-${opposite}`).trim() : "",
+		isRerun: parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) > 1,
+		pr,
+		prKey: `${pr.owner}/${pr.repo}#${pr.num}`,
 	};
 }
 
@@ -539,26 +542,20 @@ async function findMatches(prMatches, job, state, slack) {
 	if (cached?.length) return cached;
 	await ensureBotUserId(state, slack);
 	const channels = await ensureChannels(state, slack);
-	return discoverMatches(
-		channels,
-		job.prCtx.owner,
-		job.prCtx.repo,
-		job.prCtx.num,
-		slack,
-	);
+	return discoverMatches(channels, job.pr, slack);
 }
 
 // React to as many matches as the per-run cap allows; carry the rest over
 // in the cache so the next event for this PR picks them up.
 async function applyReactions(matches, job, state, slack) {
 	const ctx = {
-		emoji: job.emoji,
-		oppositeEmoji: job.oppositeEmoji,
+		addEmoji: job.addEmoji,
+		removeEmoji: job.removeEmoji,
 		botUserId: state.botUserId,
 		isRerun: job.isRerun,
 		slack,
 	};
-	if (job.oppositeEmoji && !job.isRerun && matches.length && !ctx.botUserId) {
+	if (job.removeEmoji && !job.isRerun && matches.length && !ctx.botUserId) {
 		ctx.botUserId = await ensureBotUserId(state, slack);
 	}
 
@@ -597,8 +594,7 @@ function saveKey() {
 }
 
 async function main() {
-	const { error, job } = readJob();
-	if (error) return error;
+	const job = readJob();
 	if (!job) return;
 	console.log(`::add-mask::${job.token}`);
 
@@ -617,9 +613,11 @@ async function main() {
 }
 
 if (import.meta.main) {
-	const message = await main();
-	if (message) {
-		console.error(message);
+	try {
+		await main();
+	} catch (e) {
+		if (!(e instanceof FatalError)) throw e;
+		console.error(e.message);
 		process.exit(1);
 	}
 }
