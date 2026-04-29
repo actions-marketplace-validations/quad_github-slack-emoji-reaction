@@ -41,7 +41,6 @@ const REACTIONS_PER_RUN_CAP = 50;
 const SLACK_PACE_MS = 1200;
 const RETRY_AFTER_CAP_S = 60;
 const MAX_RETRIES = 3;
-const CACHE_KEY_PREFIX = "slack-emoji-reactions-state-";
 const CACHE_VERSION = "slack-emoji-reactions-v1";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -213,8 +212,13 @@ export class CacheClient {
 	#fetch;
 	#headers;
 	#enabled;
+	#keyPrefix;
 
-	constructor({ env = process.env, fetch = globalThis.fetch } = {}) {
+	constructor({
+		env = process.env,
+		fetch = globalThis.fetch,
+		keyPrefix = "slack-emoji-reactions-state-",
+	} = {}) {
 		const rawBase = env.ACTIONS_CACHE_URL || "";
 		this.#base = rawBase.endsWith("/") ? rawBase : rawBase ? `${rawBase}/` : "";
 		this.#token = env.ACTIONS_RUNTIME_TOKEN || "";
@@ -224,6 +228,7 @@ export class CacheClient {
 			Accept: "application/json;api-version=6.0-preview.1",
 		};
 		this.#enabled = !!this.#base && !!this.#token;
+		this.#keyPrefix = keyPrefix;
 	}
 
 	#url(path) {
@@ -245,7 +250,7 @@ export class CacheClient {
 			// against every entry we've saved, returning the most recent one.
 			lookup.searchParams.set(
 				"keys",
-				`${CACHE_KEY_PREFIX}__sentinel__,${CACHE_KEY_PREFIX}`,
+				`${this.#keyPrefix}__sentinel__,${this.#keyPrefix}`,
 			);
 			lookup.searchParams.set("version", CACHE_VERSION);
 			const res = await this.#fetch(lookup, { headers: this.#headers });
@@ -268,7 +273,7 @@ export class CacheClient {
 		}
 	}
 
-	async save(state, key) {
+	async save(state, suffix) {
 		if (!this.#enabled) return;
 		try {
 			const body = Buffer.from(JSON.stringify(state), "utf8");
@@ -277,7 +282,7 @@ export class CacheClient {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
-					key,
+					key: `${this.#keyPrefix}${suffix}`,
 					version: CACHE_VERSION,
 					cacheSize: body.length,
 				}),
@@ -587,12 +592,6 @@ function finalizeMatches(prMatches, job, survivors) {
 	if (evicted) console.warn(`pr-entries safety cap; evicted ${evicted}`);
 }
 
-function saveKey() {
-	const runId = process.env.GITHUB_RUN_ID || "norunid";
-	const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
-	return `${CACHE_KEY_PREFIX}${runId}-${runAttempt}`;
-}
-
 async function main() {
 	const job = readJob();
 	if (!job) return;
@@ -609,7 +608,9 @@ async function main() {
 	finalizeMatches(prMatches, job, survivors);
 
 	state.prMatches = prMatches.toJSON();
-	await cache.save(state, saveKey());
+	const runId = process.env.GITHUB_RUN_ID || "norunid";
+	const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
+	await cache.save(state, `${runId}-${runAttempt}`);
 }
 
 if (import.meta.main) {
