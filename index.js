@@ -344,11 +344,9 @@ export class CacheClient {
 // TTL-aware memoization (ensure), stale-sweep, and LRU cap.
 export class Memo {
 	#cells;
-	#max;
 
-	constructor(cells = {}, { max = Infinity } = {}) {
+	constructor(cells = {}) {
 		this.#cells = cells;
-		this.#max = max;
 	}
 
 	get(key) {
@@ -382,14 +380,14 @@ export class Memo {
 		return before - Object.keys(this.#cells).length;
 	}
 
-	// Keep the most-recently-refreshed #max entries. Returns count evicted.
-	capByLru() {
+	// Keep the most-recently-refreshed `max` entries. Returns count evicted.
+	capByLru(max) {
 		const keys = Object.keys(this.#cells);
-		if (keys.length <= this.#max) return 0;
+		if (keys.length <= max) return 0;
 		keys.sort(
 			(a, b) => this.#cells[a].refreshedAt - this.#cells[b].refreshedAt,
 		);
-		const evict = keys.slice(0, keys.length - this.#max);
+		const evict = keys.slice(0, keys.length - max);
 		for (const k of evict) delete this.#cells[k];
 		return evict.length;
 	}
@@ -619,7 +617,7 @@ async function main() {
 	const cache = new CacheClient();
 	const restored = (await cache.restore()) ?? {};
 	const memo = new Memo(restored.memo);
-	const prMatches = new Memo(restored.prMatches, { max: MAX_PR_ENTRIES });
+	const prMatches = new Memo(restored.prMatches);
 
 	prMatches.sweepStale(nowS() - PR_STALE_TTL_S);
 
@@ -627,7 +625,7 @@ async function main() {
 	const survivors = await applyReactions(slack, memo, job, matches);
 	finalizeMatches(prMatches, job, survivors);
 
-	const evicted = prMatches.capByLru();
+	const evicted = prMatches.capByLru(MAX_PR_ENTRIES);
 	if (evicted) console.warn(`pr-entries safety cap; evicted ${evicted}`);
 
 	await cache.save({ memo, prMatches });
