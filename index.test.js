@@ -7,8 +7,9 @@ import {
 	AuthError,
 	deriveStatus,
 	discoverMatches,
-	ensureBotUserId,
-	ensureChannels,
+	fetchBotUserId,
+	fetchChannels,
+	Memo,
 	matchesPullUrl,
 	prContext,
 	reactToMatch,
@@ -338,9 +339,9 @@ test("slack.call: non-rate-limit errors are returned without retry", async () =>
 	assert.equal(calls.length, 1);
 });
 
-// ---------------------------------------------------------------- ensureChannels
+// ---------------------------------------------------------------- fetchChannels
 
-test("ensureChannels: paginates conversations.list and filters to is_member", async () => {
+test("fetchChannels: paginates conversations.list and filters to is_member", async () => {
 	const { slack, calls } = slackFor({
 		"conversations.list": [
 			{
@@ -365,8 +366,7 @@ test("ensureChannels: paginates conversations.list and filters to is_member", as
 			},
 		],
 	});
-	const state = {};
-	const channels = await ensureChannels(slack, state);
+	const channels = await fetchChannels(slack);
 	assert.deepEqual(
 		channels.map((c) => c.id),
 		["C1", "C3"],
@@ -375,15 +375,23 @@ test("ensureChannels: paginates conversations.list and filters to is_member", as
 	assert.equal(calls[1].params.cursor, "cursor-page-2");
 });
 
-test("ensureChannels: returns cached list when within TTL", async () => {
-	const { slack, calls } = slackFor({ "conversations.list": [] });
-	const state = {
-		channels: [{ id: "C1", name: "general" }],
-		channelsRefreshedAt: Math.floor(Date.now() / 1000) - 60,
-	};
-	const channels = await ensureChannels(slack, state);
-	assert.equal(channels.length, 1);
-	assert.equal(calls.length, 0);
+// ---------------------------------------------------------------- Memo
+
+test("Memo.get: caches first call, skips fetcher on subsequent calls within TTL", async () => {
+	const memo = new Memo();
+	let calls = 0;
+	const fetcher = async () => ++calls;
+	assert.equal(await memo.get("k", 60, fetcher), 1);
+	assert.equal(await memo.get("k", 60, fetcher), 1);
+	assert.equal(calls, 1);
+});
+
+test("Memo.get: refetches once the cell's age exceeds the TTL", async () => {
+	// Seed a stale cell (refreshedAt 1h ago, TTL 60s).
+	const stale = Math.floor(Date.now() / 1000) - 3600;
+	const memo = new Memo({ k: { value: "old", refreshedAt: stale } });
+	const result = await memo.get("k", 60, async () => "fresh");
+	assert.equal(result, "fresh");
 });
 
 // ---------------------------------------------------------------- discoverMatches
@@ -483,25 +491,14 @@ test("discoverMatches: extracts PR URL from blocks even when text is empty", asy
 	assert.deepEqual(matches, [{ channel: "C1", ts: "1.5" }]);
 });
 
-// ---------------------------------------------------------------- ensureBotUserId / auth errors
+// ---------------------------------------------------------------- fetchBotUserId
 
-test("ensureBotUserId: caches the bot user id and skips auth.test on second call", async () => {
-	const { slack, calls } = slackFor({
-		"auth.test": [{ body: { ok: true, user_id: "U0BOT" } }],
-	});
-	const state = {};
-	await ensureBotUserId(slack, state);
-	await ensureBotUserId(slack, state);
-	assert.equal(state.botUserId, "U0BOT");
-	assert.equal(calls.length, 1);
-});
-
-test("ensureBotUserId: throws AuthError on invalid_auth (so caller can clean-exit)", async () => {
+test("fetchBotUserId: throws AuthError on invalid_auth (so caller can clean-exit)", async () => {
 	const { slack } = slackFor({
 		"auth.test": [{ body: { ok: false, error: "invalid_auth" } }],
 	});
 	await assert.rejects(
-		ensureBotUserId(slack, {}),
+		fetchBotUserId(slack),
 		(e) => e instanceof AuthError && e.code === "invalid_auth",
 	);
 });

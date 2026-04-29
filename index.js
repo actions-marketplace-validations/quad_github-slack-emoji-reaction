@@ -31,6 +31,7 @@ const AUTH_ERRORS = new Set([
 	"not_authed",
 ]);
 
+const BOT_USER_ID_TTL_S = 30 * 24 * 3600;
 const CHANNEL_LIST_TTL_S = 24 * 3600;
 const PR_STALE_TTL_S = 90 * 24 * 3600;
 const MAX_PR_ENTRIES = 10000;
@@ -375,23 +376,43 @@ export class PrMatches {
 	}
 }
 
-export async function ensureBotUserId(slack, state) {
-	if (state.botUserId) return state.botUserId;
+// TTL-keyed memoized cache. `get(key, ttlS, fetcher)` returns the cached
+// value if fresh, otherwise runs the fetcher and writes back. Cell shape is
+// { value, refreshedAt } — uniform per cell, so any I/O can be cached the
+// same way.
+export class Memo {
+	#cells;
+
+	constructor(cells = {}) {
+		this.#cells = cells;
+	}
+
+	async get(key, ttlS, fetcher) {
+		const cell = this.#cells[key];
+		if (cell?.value !== undefined && nowS() - cell.refreshedAt < ttlS) {
+			return cell.value;
+		}
+		const value = await fetcher();
+		this.#cells[key] = { value, refreshedAt: nowS() };
+		return value;
+	}
+
+	toJSON() {
+		return this.#cells;
+	}
+}
+
+// Fetchers paired with their memo keys + TTLs. The functions here are the
+// concrete I/O; ActionState.memo decides whether to invoke them.
+export async function fetchBotUserId(slack) {
 	const res = await slack.call("auth.test", {});
 	checkAuth(res);
 	if (!res.ok) throw new Error(`auth.test failed: ${res.error}`);
-	state.botUserId = res.user_id;
-	return state.botUserId;
+	return res.user_id;
 }
 
-export async function ensureChannels(slack, state) {
-	const fresh =
-		state.channels &&
-		state.channelsRefreshedAt &&
-		nowS() - state.channelsRefreshedAt < CHANNEL_LIST_TTL_S;
-	if (fresh) return state.channels;
-
-	const channels = [];
+export async function fetchChannels(slack) {
+	const out = [];
 	let cursor = "";
 	while (true) {
 		const params = {
@@ -404,14 +425,12 @@ export async function ensureChannels(slack, state) {
 		checkAuth(res);
 		if (!res.ok) throw new Error(`conversations.list failed: ${res.error}`);
 		for (const c of res.channels) {
-			if (c.is_member) channels.push({ id: c.id, name: c.name });
+			if (c.is_member) out.push({ id: c.id, name: c.name });
 		}
 		cursor = res.response_metadata?.next_cursor || "";
 		if (!cursor) break;
 	}
-	state.channels = channels;
-	state.channelsRefreshedAt = nowS();
-	return channels;
+	return out;
 }
 
 export async function discoverMatches(slack, pr, channels) {
@@ -544,27 +563,30 @@ function readJob() {
 	};
 }
 
-async function findMatches(slack, state, prMatches, job) {
+async function findMatches(slack, memo, prMatches, job) {
 	const cached = prMatches.get(job.prKey);
 	if (cached?.length) return cached;
-	await ensureBotUserId(slack, state);
-	const channels = await ensureChannels(slack, state);
+	const channels = await memo.get("channels", CHANNEL_LIST_TTL_S, () =>
+		fetchChannels(slack),
+	);
 	return discoverMatches(slack, job.pr, channels);
 }
 
 // React to as many matches as the per-run cap allows; carry the rest over
 // in the cache so the next event for this PR picks them up.
-async function applyReactions(slack, state, job, matches) {
+async function applyReactions(slack, memo, job, matches) {
+	const needsFlipCleanup = job.removeEmoji && !job.isRerun && matches.length;
 	const ctx = {
 		addEmoji: job.addEmoji,
 		removeEmoji: job.removeEmoji,
-		botUserId: state.botUserId,
 		isRerun: job.isRerun,
 		slack,
+		botUserId: needsFlipCleanup
+			? await memo.get("botUserId", BOT_USER_ID_TTL_S, () =>
+					fetchBotUserId(slack),
+				)
+			: null,
 	};
-	if (job.removeEmoji && !job.isRerun && matches.length && !ctx.botUserId) {
-		ctx.botUserId = await ensureBotUserId(slack, state);
-	}
 
 	const toReact = matches.slice(0, REACTIONS_PER_RUN_CAP);
 	const overflow = matches.slice(REACTIONS_PER_RUN_CAP);
@@ -589,9 +611,6 @@ function finalizeMatches(prMatches, job, survivors) {
 		job.status === STATUS_MERGED || job.status === STATUS_CLOSED;
 	if (isTerminal || !survivors.length) prMatches.delete(job.prKey);
 	else prMatches.set(job.prKey, survivors);
-
-	const evicted = prMatches.capByLru(MAX_PR_ENTRIES);
-	if (evicted) console.warn(`pr-entries safety cap; evicted ${evicted}`);
 }
 
 async function main() {
@@ -601,18 +620,25 @@ async function main() {
 
 	const slack = new SlackClient({ token: job.token });
 	const cache = new CacheClient();
-	const state = (await cache.restore()) ?? {};
-	const prMatches = new PrMatches(state.prMatches);
+	const restored = (await cache.restore()) ?? {};
+	const memo = new Memo(restored.memo);
+	const prMatches = new PrMatches(restored.prMatches);
+
 	prMatches.sweepStale(nowS() - PR_STALE_TTL_S);
 
-	const matches = await findMatches(slack, state, prMatches, job);
-	const survivors = await applyReactions(slack, state, job, matches);
+	const matches = await findMatches(slack, memo, prMatches, job);
+	const survivors = await applyReactions(slack, memo, job, matches);
 	finalizeMatches(prMatches, job, survivors);
 
-	state.prMatches = prMatches.toJSON();
+	const evicted = prMatches.capByLru(MAX_PR_ENTRIES);
+	if (evicted) console.warn(`pr-entries safety cap; evicted ${evicted}`);
+
 	const runId = process.env.GITHUB_RUN_ID || "norunid";
 	const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "1";
-	await cache.save(state, `${runId}-${runAttempt}`);
+	await cache.save(
+		{ memo: memo.toJSON(), prMatches: prMatches.toJSON() },
+		`${runId}-${runAttempt}`,
+	);
 }
 
 if (import.meta.main) {
