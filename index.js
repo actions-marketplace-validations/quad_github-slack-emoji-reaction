@@ -38,6 +38,7 @@ const MAX_CHANNELS_PER_RUN = 100;
 const HISTORY_PAGES_PER_CHANNEL = 3;
 const HISTORY_LOOKBACK_S = 30 * 24 * 3600;
 const REACTIONS_PER_RUN_CAP = 50;
+const MAX_PR_ENTRIES = 10000;
 const SLACK_PACE_MS = 1200;
 const RETRY_AFTER_CAP_S = 60;
 const MAX_RETRIES = 3;
@@ -339,9 +340,9 @@ export class CacheClient {
 	}
 }
 
-// Keyed map of { value, refreshedAt } cells. Shared base for any keyed
-// store that needs TTL-aware reads, stale-sweep, and LRU cap.
-export class Cells {
+// Keyed map of { value, refreshedAt } cells. Plain reads/writes plus
+// TTL-aware memoization (ensure), stale-sweep, and LRU cap.
+export class Memo {
 	#cells;
 	#max;
 
@@ -362,10 +363,14 @@ export class Cells {
 		delete this.#cells[key];
 	}
 
-	// Seconds since the cell was last refreshed; Infinity if absent.
-	ageS(key) {
+	// Returns the cached value if its age is under `ttlS`; otherwise runs
+	// `fetcher`, writes the result back, and returns it.
+	async ensure(key, ttlS, fetcher) {
 		const cell = this.#cells[key];
-		return cell ? nowS() - cell.refreshedAt : Infinity;
+		if (cell && nowS() - cell.refreshedAt < ttlS) return cell.value;
+		const value = await fetcher();
+		this.set(key, value);
+		return value;
 	}
 
 	// Evict entries last refreshed before `cutoffS`. Returns count removed.
@@ -391,34 +396,6 @@ export class Cells {
 
 	toJSON() {
 		return this.#cells;
-	}
-}
-
-// TTL-keyed memoized cache. `ensure(key, ttlS, fetcher)` returns the cached
-// value if fresh, otherwise runs the fetcher and writes back.
-export class Memo {
-	#cells;
-
-	constructor(cells = {}) {
-		this.#cells = new Cells(cells);
-	}
-
-	async ensure(key, ttlS, fetcher) {
-		if (this.#cells.ageS(key) < ttlS) return this.#cells.get(key);
-		const value = await fetcher();
-		this.#cells.set(key, value);
-		return value;
-	}
-
-	toJSON() {
-		return this.#cells;
-	}
-}
-
-// Per-PR cache map: { "owner/repo#num" → matches }.
-export class PrMatches extends Cells {
-	constructor(entries = {}) {
-		super(entries, { max: 10000 });
 	}
 }
 
@@ -642,7 +619,7 @@ async function main() {
 	const cache = new CacheClient();
 	const restored = (await cache.restore()) ?? {};
 	const memo = new Memo(restored.memo);
-	const prMatches = new PrMatches(restored.prMatches);
+	const prMatches = new Memo(restored.prMatches, { max: MAX_PR_ENTRIES });
 
 	prMatches.sweepStale(nowS() - PR_STALE_TTL_S);
 
