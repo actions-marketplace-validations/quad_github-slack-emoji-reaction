@@ -90,9 +90,14 @@ const PR_URL = new URLPattern({
 	pathname: "/:owner/:repo/pull/:num",
 });
 
-export function matchesPullUrl(candidate, owner, repo, num) {
+export function matchesPullUrl(pr, candidate) {
 	const g = PR_URL.exec(candidate)?.pathname.groups;
-	return !!g && g.owner === owner && g.repo === repo && g.num === String(num);
+	return (
+		!!g &&
+		g.owner === pr.owner &&
+		g.repo === pr.repo &&
+		g.num === String(pr.num)
+	);
 }
 
 export function deriveStatus(eventName, payload) {
@@ -439,11 +444,7 @@ export async function discoverMatches(channels, pr, slack) {
 				break;
 			}
 			for (const msg of res.messages) {
-				if (
-					urlsFromMessage(msg).some((c) =>
-						matchesPullUrl(c, pr.owner, pr.repo, pr.num),
-					)
-				) {
+				if (urlsFromMessage(msg).some((c) => matchesPullUrl(pr, c))) {
 					matches.push({ channel: ch.id, ts: msg.ts });
 					foundInChannel = true;
 					break;
@@ -456,7 +457,7 @@ export async function discoverMatches(channels, pr, slack) {
 	return matches;
 }
 
-export async function reactToMatch(match, ctx) {
+export async function reactToMatch(ctx, match) {
 	const { addEmoji, removeEmoji, botUserId, isRerun, slack } = ctx;
 	const where = `${match.channel}/${match.ts}`;
 
@@ -574,7 +575,7 @@ async function applyReactions(matches, job, state, slack) {
 	}
 
 	const reacted = [];
-	for (const m of toReact) reacted.push([m, await reactToMatch(m, ctx)]);
+	for (const m of toReact) reacted.push([m, await reactToMatch(ctx, m)]);
 	return [
 		...reacted.filter(([, r]) => keepsMatch(r)).map(([m]) => m),
 		...overflow,

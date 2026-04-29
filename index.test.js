@@ -119,7 +119,8 @@ test("prContext: returns null on incomplete payload", () => {
 // ---------------------------------------------------------------- matchesPullUrl
 
 test("matchesPullUrl: accepts the canonical PR URL with or without query/fragment", () => {
-	const m = (u) => matchesPullUrl(u, "octo", "hello", 123);
+	const pr = { owner: "octo", repo: "hello", num: 123 };
+	const m = (u) => matchesPullUrl(pr, u);
 	assert.equal(m("https://github.com/octo/hello/pull/123"), true);
 	assert.equal(
 		m("https://github.com/octo/hello/pull/123?diff=split#discussion"),
@@ -128,7 +129,8 @@ test("matchesPullUrl: accepts the canonical PR URL with or without query/fragmen
 });
 
 test("matchesPullUrl: rejects everything else", () => {
-	const m = (u) => matchesPullUrl(u, "octo", "hello", 123);
+	const pr = { owner: "octo", repo: "hello", num: 123 };
+	const m = (u) => matchesPullUrl(pr, u);
 	// /pull/1234 is the substring trap a naive includes() would hit.
 	assert.equal(m("https://github.com/octo/hello/pull/1234"), false);
 	// nested path under the PR
@@ -526,13 +528,13 @@ test("reactToMatch: approved with our bot owning a stale changes-requested remov
 		"reactions.add": [{ body: { ok: true } }],
 	});
 	const result = await reactToMatch(
-		{ channel: "C1", ts: "1.0" },
 		ctx({
 			slack,
 			addEmoji: "white_check_mark",
 			removeEmoji: "warning",
 			botUserId: "U0BOT",
 		}),
+		{ channel: "C1", ts: "1.0" },
 	);
 	assert.equal(result.ok, true);
 	assert.deepEqual(
@@ -556,13 +558,13 @@ test("reactToMatch: approved without our bot in the warning users array does NOT
 		"reactions.add": [{ body: { ok: true } }],
 	});
 	await reactToMatch(
-		{ channel: "C1", ts: "1.0" },
 		ctx({
 			slack,
 			addEmoji: "white_check_mark",
 			removeEmoji: "warning",
 			botUserId: "U0BOT",
 		}),
+		{ channel: "C1", ts: "1.0" },
 	);
 	// No reactions.remove call.
 	assert.deepEqual(
@@ -576,7 +578,6 @@ test("reactToMatch: when isRerun=true, skips the entire flip-cleanup branch (re-
 		"reactions.add": [{ body: { ok: true } }],
 	});
 	await reactToMatch(
-		{ channel: "C1", ts: "1.0" },
 		ctx({
 			slack,
 			addEmoji: "white_check_mark",
@@ -584,6 +585,7 @@ test("reactToMatch: when isRerun=true, skips the entire flip-cleanup branch (re-
 			botUserId: "U0BOT",
 			isRerun: true,
 		}),
+		{ channel: "C1", ts: "1.0" },
 	);
 	// No reactions.get, no reactions.remove. Just the additive add.
 	assert.deepEqual(
@@ -598,8 +600,8 @@ test("reactToMatch: tolerated reaction errors (already_reacted) do not throw", a
 	});
 	// No removeEmoji passed so flip cleanup is skipped.
 	const result = await reactToMatch(
-		{ channel: "C1", ts: "1.0" },
 		ctx({ slack, addEmoji: "large_purple_square" }),
+		{ channel: "C1", ts: "1.0" },
 	);
 	assert.equal(result.error, "already_reacted");
 });
@@ -609,8 +611,8 @@ test("reactToMatch: stale-match errors (channel_not_found) surface so caller can
 		"reactions.add": [{ body: { ok: false, error: "channel_not_found" } }],
 	});
 	const result = await reactToMatch(
-		{ channel: "C1", ts: "1.0" },
 		ctx({ slack, addEmoji: "large_purple_square" }),
+		{ channel: "C1", ts: "1.0" },
 	);
 	assert.equal(result.error, "channel_not_found");
 });
@@ -620,7 +622,7 @@ test("reactToMatch: invalid_auth on reactions.add propagates as AuthError", asyn
 		"reactions.add": [{ body: { ok: false, error: "invalid_auth" } }],
 	});
 	await assert.rejects(
-		reactToMatch({ channel: "C1", ts: "1.0" }, ctx({ slack })),
+		reactToMatch(ctx({ slack }), { channel: "C1", ts: "1.0" }),
 		(e) => e instanceof AuthError && e.code === "invalid_auth",
 	);
 });
