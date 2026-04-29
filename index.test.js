@@ -59,27 +59,6 @@ test("deriveStatus: pull_request_review submitted changes_requested → changes-
 	);
 });
 
-test("deriveStatus: pull_request_review submitted commented → null (deliberately ignored)", () => {
-	// Upstream submitted.payload.json has review.state: "commented" verbatim.
-	assert.equal(
-		deriveStatus(
-			"pull_request_review",
-			upstream("pull_request_review/submitted.payload.json"),
-		),
-		null,
-	);
-});
-
-test("deriveStatus: pull_request_review dismissed → null (deliberately ignored)", () => {
-	assert.equal(
-		deriveStatus(
-			"pull_request_review",
-			upstream("pull_request_review/dismissed.payload.json"),
-		),
-		null,
-	);
-});
-
 test("deriveStatus: pull_request closed merged=true → merged", () => {
 	const payload = variant("pull_request/closed.payload.json", {
 		"pull_request.merged": true,
@@ -95,14 +74,26 @@ test("deriveStatus: pull_request closed merged=false → closed", () => {
 	);
 });
 
-test("deriveStatus: pull_request opened → null (no review-requested mapping)", () => {
+test("deriveStatus: returns null for non-mapped events", () => {
+	// commented reviews, dismissed reviews, opened PRs, and unrelated events.
+	assert.equal(
+		deriveStatus(
+			"pull_request_review",
+			upstream("pull_request_review/submitted.payload.json"),
+		),
+		null,
+	);
+	assert.equal(
+		deriveStatus(
+			"pull_request_review",
+			upstream("pull_request_review/dismissed.payload.json"),
+		),
+		null,
+	);
 	assert.equal(
 		deriveStatus("pull_request", upstream("pull_request/opened.payload.json")),
 		null,
 	);
-});
-
-test("deriveStatus: unknown event → null", () => {
 	assert.equal(deriveStatus("issues", { action: "opened" }), null);
 });
 
@@ -118,93 +109,37 @@ test("prContext: extracts owner/repo/num from authoritative payload", () => {
 	});
 });
 
-test("prContext: rejects payload with missing structured fields", () => {
+test("prContext: returns null on incomplete payload", () => {
+	// Missing structured fields (owner/repo/number).
 	assert.equal(prContext({ pull_request: { html_url: "x" } }), null);
-});
-
-test("prContext: rejects missing pull_request", () => {
+	// Missing pull_request entirely.
 	assert.equal(prContext({}), null);
 });
 
 // ---------------------------------------------------------------- matchesPullUrl
 
-test("matchesPullUrl: exact match", () => {
+test("matchesPullUrl: accepts the canonical PR URL with or without query/fragment", () => {
+	const m = (u) => matchesPullUrl(u, "octo", "hello", 123);
+	assert.equal(m("https://github.com/octo/hello/pull/123"), true);
 	assert.equal(
-		matchesPullUrl(
-			"https://github.com/octo/hello/pull/123",
-			"octo",
-			"hello",
-			123,
-		),
+		m("https://github.com/octo/hello/pull/123?diff=split#discussion"),
 		true,
 	);
 });
 
-// Real boundary: substring '/pull/123' is a prefix of '/pull/1234'. This is the
-// case naive String.includes() / pathname.startsWith() implementations get wrong.
-test("matchesPullUrl: /pull/1234 does NOT match /pull/123 (substring trap)", () => {
-	assert.equal(
-		matchesPullUrl(
-			"https://github.com/octo/hello/pull/1234",
-			"octo",
-			"hello",
-			123,
-		),
-		false,
-	);
-});
-
-test("matchesPullUrl: nested path under PR (e.g. /files) does NOT match", () => {
-	assert.equal(
-		matchesPullUrl(
-			"https://github.com/octo/hello/pull/123/files",
-			"octo",
-			"hello",
-			123,
-		),
-		false,
-	);
-});
-
-test("matchesPullUrl: rejects different host", () => {
-	assert.equal(
-		matchesPullUrl(
-			"https://gitlab.com/octo/hello/pull/123",
-			"octo",
-			"hello",
-			123,
-		),
-		false,
-	);
-});
-
-test("matchesPullUrl: rejects different repo", () => {
-	assert.equal(
-		matchesPullUrl(
-			"https://github.com/octo/other/pull/123",
-			"octo",
-			"hello",
-			123,
-		),
-		false,
-	);
-});
-
-test("matchesPullUrl: garbage / empty candidates do not throw", () => {
-	assert.equal(matchesPullUrl("not a url", "octo", "hello", 123), false);
-	assert.equal(matchesPullUrl("", "octo", "hello", 123), false);
-});
-
-test("matchesPullUrl: query string and fragment do not affect path match", () => {
-	assert.equal(
-		matchesPullUrl(
-			"https://github.com/octo/hello/pull/123?diff=split#discussion",
-			"octo",
-			"hello",
-			123,
-		),
-		true,
-	);
+test("matchesPullUrl: rejects everything else", () => {
+	const m = (u) => matchesPullUrl(u, "octo", "hello", 123);
+	// /pull/1234 is the substring trap a naive includes() would hit.
+	assert.equal(m("https://github.com/octo/hello/pull/1234"), false);
+	// nested path under the PR
+	assert.equal(m("https://github.com/octo/hello/pull/123/files"), false);
+	// different host
+	assert.equal(m("https://gitlab.com/octo/hello/pull/123"), false);
+	// different repo
+	assert.equal(m("https://github.com/octo/other/pull/123"), false);
+	// unparseable / empty
+	assert.equal(m("not a url"), false);
+	assert.equal(m(""), false);
 });
 
 // ---------------------------------------------------------------- tokenizeAngles
