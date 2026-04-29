@@ -488,43 +488,49 @@ export async function reactToMatch(match, ctx) {
 	return { ok: !!add.ok, error: add.error };
 }
 
-// Read everything we need from the env + payload. Returns:
-//   - a string  → operator-facing error; main returns it for exit 1.
-//   - undefined → routine skip (unmapped event, no emoji, fork PR).
-//   - an object → the job specification to run.
+// Read env + payload into one of three tagged shapes:
+//   { error }  — operator-facing error; main returns it for exit 1.
+//   {}         — routine skip (unmapped event, no emoji, fork PR).
+//   { job }    — proceed with the work.
 function readJob() {
 	const eventPath = process.env.GITHUB_EVENT_PATH;
 	if (!eventPath)
-		return "GITHUB_EVENT_PATH not set; not running inside GitHub Actions";
+		return {
+			error: "GITHUB_EVENT_PATH not set; not running inside GitHub Actions",
+		};
 	const eventName = process.env.GITHUB_EVENT_NAME;
 	if (!eventName)
-		return "GITHUB_EVENT_NAME not set; not running inside GitHub Actions";
+		return {
+			error: "GITHUB_EVENT_NAME not set; not running inside GitHub Actions",
+		};
 	const payload = JSON.parse(fs.readFileSync(eventPath, "utf8"));
 
 	const status = deriveStatus(eventName, payload);
-	if (!status) return;
+	if (!status) return {};
 	const emoji = input(`emoji-${status}`).trim();
-	if (!emoji) return;
+	if (!emoji) return {};
 
 	const token = input("slack-token").trim();
 	if (!token) {
 		// Fork PRs run with empty secrets by design — that's not a misconfig.
-		if (payload.pull_request?.head?.repo?.fork) return;
-		return "slack-token is missing; set the SLACK_TOKEN secret";
+		if (payload.pull_request?.head?.repo?.fork) return {};
+		return { error: "slack-token is missing; set the SLACK_TOKEN secret" };
 	}
 
 	const prCtx = prContext(payload);
-	if (!prCtx) return "could not derive PR context from payload";
+	if (!prCtx) return { error: "could not derive PR context from payload" };
 
 	const opposite = FLIP_OPPOSITE[status];
 	return {
-		status,
-		emoji,
-		token,
-		oppositeEmoji: opposite ? input(`emoji-${opposite}`).trim() : "",
-		isRerun: parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) > 1,
-		prCtx,
-		prKey: `${prCtx.owner}/${prCtx.repo}#${prCtx.num}`,
+		job: {
+			status,
+			emoji,
+			token,
+			oppositeEmoji: opposite ? input(`emoji-${opposite}`).trim() : "",
+			isRerun: parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) > 1,
+			prCtx,
+			prKey: `${prCtx.owner}/${prCtx.repo}#${prCtx.num}`,
+		},
 	};
 }
 
@@ -591,8 +597,8 @@ function saveKey() {
 }
 
 async function main() {
-	const job = readJob();
-	if (typeof job === "string") return job;
+	const { error, job } = readJob();
+	if (error) return error;
 	if (!job) return;
 	console.log(`::add-mask::${job.token}`);
 
@@ -611,9 +617,9 @@ async function main() {
 }
 
 if (import.meta.main) {
-	main().then((message) => {
-		if (!message) return;
+	const message = await main();
+	if (message) {
 		console.error(message);
 		process.exit(1);
-	});
+	}
 }
