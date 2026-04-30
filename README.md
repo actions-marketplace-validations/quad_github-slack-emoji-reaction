@@ -71,6 +71,7 @@ Behavior: review dismissals are always ignored. `approved` ↔ `changes-requeste
 - Top-level messages only (thread replies aren't scanned).
 - 30-day lookback. PRs whose Slack post is older won't get reactions on later state changes.
 - Up to 100 bot-member channels and 50 reactions per run; the rest carry over to the next run for the same PR.
+- Bursts of 3+ near-simultaneous events on one PR can drop a middle reaction: the per-PR concurrency group serializes runs (so `approved`/`changes-requested` flips can't race) but only queues one pending run, so a third event evicts the second.
 
 ## Troubleshooting
 
