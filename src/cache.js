@@ -14,10 +14,16 @@ export class CacheClient {
 		const env = process.env;
 		const url = env.ACTIONS_CACHE_URL;
 		const token = env.ACTIONS_RUNTIME_TOKEN;
-		// Disabled if either env var is missing OR the URL is malformed —
-		// any of these mean we can't talk to the cache; degrade silently.
 		if (!url || !token || !URL.canParse(url)) {
 			this.#enabled = false;
+			// Outside GHA (local testing) the env vars are absent by design.
+			// Inside GHA they should always be present — warn so misconfig
+			// is visible. Action still works; runs just don't cache.
+			if (env.GITHUB_ACTIONS) {
+				console.warn(
+					"GHA cache unavailable; runs will re-discover Slack messages each time.",
+				);
+			}
 			return;
 		}
 		// new URL(relative, base) needs a trailing slash on base or it'd

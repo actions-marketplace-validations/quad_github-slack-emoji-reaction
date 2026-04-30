@@ -295,11 +295,15 @@ test("Memo.ensure: refetches once the cell's age exceeds the TTL", async () => {
 
 // ---------------------------------------------------------------- CacheClient
 
-test("CacheClient: no-op when ACTIONS_CACHE_URL is missing", async () => {
-	const origUrl = process.env.ACTIONS_CACHE_URL;
-	const origToken = process.env.ACTIONS_RUNTIME_TOKEN;
+test("CacheClient: no-op when ACTIONS_CACHE_URL is missing (outside GHA)", async () => {
+	const orig = {
+		url: process.env.ACTIONS_CACHE_URL,
+		token: process.env.ACTIONS_RUNTIME_TOKEN,
+		gha: process.env.GITHUB_ACTIONS,
+	};
 	delete process.env.ACTIONS_CACHE_URL;
 	delete process.env.ACTIONS_RUNTIME_TOKEN;
+	delete process.env.GITHUB_ACTIONS;
 	try {
 		const cache = new CacheClient();
 		assert.equal(
@@ -309,8 +313,36 @@ test("CacheClient: no-op when ACTIONS_CACHE_URL is missing", async () => {
 		);
 		await cache.save({ memo: {}, prMatches: {} });
 	} finally {
-		if (origUrl !== undefined) process.env.ACTIONS_CACHE_URL = origUrl;
-		if (origToken !== undefined) process.env.ACTIONS_RUNTIME_TOKEN = origToken;
+		if (orig.url !== undefined) process.env.ACTIONS_CACHE_URL = orig.url;
+		if (orig.token !== undefined)
+			process.env.ACTIONS_RUNTIME_TOKEN = orig.token;
+		if (orig.gha !== undefined) process.env.GITHUB_ACTIONS = orig.gha;
+	}
+});
+
+test("CacheClient: warns when cache is unavailable inside GHA (misconfig)", async () => {
+	const orig = {
+		url: process.env.ACTIONS_CACHE_URL,
+		token: process.env.ACTIONS_RUNTIME_TOKEN,
+		gha: process.env.GITHUB_ACTIONS,
+		warn: console.warn,
+	};
+	delete process.env.ACTIONS_CACHE_URL;
+	delete process.env.ACTIONS_RUNTIME_TOKEN;
+	process.env.GITHUB_ACTIONS = "true";
+	const warnings = [];
+	console.warn = (msg) => warnings.push(msg);
+	try {
+		new CacheClient();
+		assert.equal(warnings.length, 1);
+		assert.match(warnings[0], /cache unavailable/i);
+	} finally {
+		console.warn = orig.warn;
+		if (orig.url !== undefined) process.env.ACTIONS_CACHE_URL = orig.url;
+		if (orig.token !== undefined)
+			process.env.ACTIONS_RUNTIME_TOKEN = orig.token;
+		if (orig.gha !== undefined) process.env.GITHUB_ACTIONS = orig.gha;
+		else delete process.env.GITHUB_ACTIONS;
 	}
 });
 
