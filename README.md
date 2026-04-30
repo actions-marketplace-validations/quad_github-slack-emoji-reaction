@@ -57,10 +57,8 @@ For PR-themed custom emoji (e.g. GitHub's actual review icons), see
 4. **Invite the bot** in each channel where reactions should appear:
    `/invite @github-pr-reactions`. Reactions only appear in member channels.
 
-> ⚠️ **Install in your own workspace; do not submit to the Slack Marketplace.**
-> Slack rate-limits `conversations.history` to 1 request/minute for newly
-> distributed Marketplace apps. Workspace-internal apps keep the standard
-> ~50/minute, which this action depends on.
+> ⚠️ **Install in your own workspace; do not submit to the Slack Marketplace** —
+> Marketplace apps hit a Slack rate limit that breaks this action.
 
 ## Limits
 
