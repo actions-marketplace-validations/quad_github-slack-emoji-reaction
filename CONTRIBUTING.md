@@ -15,12 +15,12 @@ npm run lint              # biome only
 npm run format            # biome with --write
 ```
 
-44 unit tests cover the pure helpers (`deriveStatus`, `prContext`,
+Unit tests cover the pure helpers (`deriveStatus`, `prContext`,
 `matchesPullUrl`, `urlsFromMessage`, `tokenizeAngles`) and the dynamic
-surface (`SlackClient.call` retry, `ensureChannels` pagination,
-`discoverMatches` scan + caps, `ensureBotUserId` auth, `reactToMatch` flip
-cleanup with various bot-id and re-run permutations) via a scripted fetch
-shim.
+surface (`SlackClient.call` retry, `fetchChannels` pagination,
+`discoverMatches` scan + caps, `fetchBotUserId` auth, `Memo.ensure`
+TTL, `reactToMatch` flip cleanup with various bot-id and re-run
+permutations) via a scripted fetch shim.
 
 ## Integration tests
 
@@ -46,17 +46,20 @@ commit. See `fixtures/SOURCE.md` for the pin and refresh recipe.
 `index.js` is a single file, organized:
 
 - **Constants** — Slack endpoint, status names, error sets, caps and TTLs.
-- **Pure helpers** — `sweepStale`, `capByLru`, `keepsMatch`, `input`, etc.
 - **URL + event helpers** — `tokenizeAngles`, `urlsFromMessage`,
   `matchesPullUrl` (URLPattern-based), `deriveStatus`, `prContext`.
-- **`AuthError`** + `checkAuth`.
-- **`SlackClient`** — call with self-pacing + 429 retry.
+- **`FatalError` / `AuthError`** — operator-fixable errors thrown with
+  pre-built messages; caught at the top level.
+- **`SlackClient`** — `call` with self-pacing, 429 retry, and inline
+  auth-error detection.
 - **`CacheClient`** — restore/save against the GHA Cache v1 API.
-- **State + slack ops** — `ensureBotUserId`, `ensureChannels`,
-  `discoverMatches`, `reactToMatch`. These mutate `state` (the JSON we
-  serialize to the cache) but otherwise compose cleanly.
-- **`main()`** — the entrypoint; reads the event payload, runs the
-  validation guards, drives discovery + reaction + save.
+- **`Memo`** — keyed `{value, refreshedAt}` cells with TTL-aware
+  `ensure`, `sweepStale`, `capByLru`. Used for both memoized I/O and
+  the per-PR match map.
+- **Slack ops** — `fetchBotUserId`, `fetchChannels`, `paginate`,
+  `discoverMatches`, `flipCleanup`, `reactToMatch`.
+- **`readJob`** + **`main`** — read env/payload into a job spec, then
+  drive sweep → discover → react → save.
 
 The action runs on `node24` in production. Pure-JS, no runtime deps.
 

@@ -106,7 +106,6 @@ test("prContext: extracts owner/repo/num from authoritative payload", () => {
 		owner: "Codertocat",
 		repo: "Hello-World",
 		num: 2,
-		prUrl: "https://github.com/Codertocat/Hello-World/pull/2",
 	});
 });
 
@@ -253,12 +252,10 @@ const slackFor = (scripts) => {
 	return { slack, calls };
 };
 
-const ctx = (overrides) => ({
-	addEmoji: "eyes",
-	removeEmoji: "",
-	botUserId: null,
-	isRerun: false,
-	...overrides,
+const ctx = ({ slack, job = {}, botUserId = null }) => ({
+	slack,
+	job: { addEmoji: "eyes", removeEmoji: "", isRerun: false, ...job },
+	botUserId,
 });
 
 // ---------------------------------------------------------------- slackCall
@@ -525,8 +522,7 @@ test("reactToMatch: approved with our bot owning a stale changes-requested remov
 	const result = await reactToMatch(
 		ctx({
 			slack,
-			addEmoji: "white_check_mark",
-			removeEmoji: "warning",
+			job: { addEmoji: "white_check_mark", removeEmoji: "warning" },
 			botUserId: "U0BOT",
 		}),
 		{ channel: "C1", ts: "1.0" },
@@ -555,8 +551,7 @@ test("reactToMatch: approved without our bot in the warning users array does NOT
 	await reactToMatch(
 		ctx({
 			slack,
-			addEmoji: "white_check_mark",
-			removeEmoji: "warning",
+			job: { addEmoji: "white_check_mark", removeEmoji: "warning" },
 			botUserId: "U0BOT",
 		}),
 		{ channel: "C1", ts: "1.0" },
@@ -575,10 +570,12 @@ test("reactToMatch: when isRerun=true, skips the entire flip-cleanup branch (re-
 	await reactToMatch(
 		ctx({
 			slack,
-			addEmoji: "white_check_mark",
-			removeEmoji: "warning",
+			job: {
+				addEmoji: "white_check_mark",
+				removeEmoji: "warning",
+				isRerun: true,
+			},
 			botUserId: "U0BOT",
-			isRerun: true,
 		}),
 		{ channel: "C1", ts: "1.0" },
 	);
@@ -595,7 +592,7 @@ test("reactToMatch: tolerated reaction errors (already_reacted) do not throw", a
 	});
 	// No removeEmoji passed so flip cleanup is skipped.
 	const result = await reactToMatch(
-		ctx({ slack, addEmoji: "large_purple_square" }),
+		ctx({ slack, job: { addEmoji: "large_purple_square" } }),
 		{ channel: "C1", ts: "1.0" },
 	);
 	assert.equal(result.error, "already_reacted");
@@ -606,7 +603,7 @@ test("reactToMatch: stale-match errors (channel_not_found) surface so caller can
 		"reactions.add": [{ body: { ok: false, error: "channel_not_found" } }],
 	});
 	const result = await reactToMatch(
-		ctx({ slack, addEmoji: "large_purple_square" }),
+		ctx({ slack, job: { addEmoji: "large_purple_square" } }),
 		{ channel: "C1", ts: "1.0" },
 	);
 	assert.equal(result.error, "channel_not_found");

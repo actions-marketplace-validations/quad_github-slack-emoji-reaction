@@ -49,8 +49,6 @@ const nowS = () => Math.floor(Date.now() / 1000);
 const input = (name) =>
 	(process.env[`INPUT_${name.toUpperCase()}`] || "").trim();
 
-const keepsMatch = (result) => !STALE_MATCH_ERRORS.has(result.error);
-
 export function tokenizeAngles(text) {
 	const out = [];
 	let i = 0;
@@ -123,7 +121,7 @@ export function prContext(payload) {
 	const repo = pr?.base?.repo?.name;
 	const num = pr?.number;
 	if (!owner || !repo || !Number.isFinite(num)) return null;
-	return { owner, repo, num, prUrl: pr.html_url };
+	return { owner, repo, num };
 }
 
 // Thrown for any condition that should fail the workflow with an
@@ -383,13 +381,11 @@ export class Memo {
 		return value;
 	}
 
-	// Evict entries last refreshed before `cutoffS`. Returns count removed.
+	// Evict entries last refreshed before `cutoffS`.
 	sweepStale(cutoffS) {
-		const before = Object.keys(this.#cells).length;
 		this.#cells = Object.fromEntries(
 			Object.entries(this.#cells).filter(([, v]) => v.refreshedAt >= cutoffS),
 		);
-		return before - Object.keys(this.#cells).length;
 	}
 
 	// Keep the most-recently-refreshed `max` entries. Returns count evicted.
@@ -409,8 +405,6 @@ export class Memo {
 	}
 }
 
-// Fetchers paired with their memo keys + TTLs. The functions here are the
-// concrete I/O; ActionState.memo decides whether to invoke them.
 export async function fetchBotUserId(slack) {
 	const res = await slack.call("auth.test", {});
 	if (!res.ok) throw new Error(`auth.test failed: ${res.error}`);
@@ -485,9 +479,14 @@ export async function discoverMatches(slack, pr, channels) {
 // approved↔changes-requested is the only flippable pair. Remove the
 // opposite emoji only if our own bot put it there. Skipped on re-runs
 // so a stale replay can't reverse a real later state.
-async function flipCleanup(ctx, match) {
-	const { removeEmoji, botUserId, isRerun, slack } = ctx;
-	if (isRerun || !removeEmoji) return;
+function warnIfUntolerated(prefix, res) {
+	if (!res.ok && !TOLERATED_REACTION_ERRORS.has(res.error)) {
+		console.warn(`${prefix}: ${res.error}`);
+	}
+}
+
+async function flipCleanup({ slack, job, botUserId }, match) {
+	if (job.isRerun || !job.removeEmoji) return;
 
 	const where = `${match.channel}/${match.ts}`;
 	const got = await slack.call("reactions.get", {
@@ -496,38 +495,29 @@ async function flipCleanup(ctx, match) {
 		full: true,
 	});
 	if (!got.ok) {
-		if (!TOLERATED_REACTION_ERRORS.has(got.error)) {
-			console.warn(`reactions.get ${where}: ${got.error}`);
-		}
+		warnIfUntolerated(`reactions.get ${where}`, got);
 		return;
 	}
-	const opp = got.message?.reactions?.find((r) => r.name === removeEmoji);
+	const opp = got.message?.reactions?.find((r) => r.name === job.removeEmoji);
 	if (!opp?.users.includes(botUserId)) return;
 
 	const rm = await slack.call("reactions.remove", {
 		channel: match.channel,
 		timestamp: match.ts,
-		name: removeEmoji,
+		name: job.removeEmoji,
 	});
-	if (!rm.ok && !TOLERATED_REACTION_ERRORS.has(rm.error)) {
-		console.warn(`reactions.remove ${where} ${removeEmoji}: ${rm.error}`);
-	}
+	warnIfUntolerated(`reactions.remove ${where} ${job.removeEmoji}`, rm);
 }
 
 export async function reactToMatch(ctx, match) {
-	const { addEmoji, slack } = ctx;
 	const where = `${match.channel}/${match.ts}`;
-
 	await flipCleanup(ctx, match);
-
-	const add = await slack.call("reactions.add", {
+	const add = await ctx.slack.call("reactions.add", {
 		channel: match.channel,
 		timestamp: match.ts,
-		name: addEmoji,
+		name: ctx.job.addEmoji,
 	});
-	if (!add.ok && !TOLERATED_REACTION_ERRORS.has(add.error)) {
-		console.warn(`reactions.add ${where} ${addEmoji}: ${add.error}`);
-	}
+	warnIfUntolerated(`reactions.add ${where} ${ctx.job.addEmoji}`, add);
 	return { ok: !!add.ok, error: add.error };
 }
 
@@ -569,6 +559,7 @@ function readJob() {
 		addEmoji,
 		removeEmoji: opposite ? input(`emoji-${opposite}`) : "",
 		isRerun: Number(process.env.GITHUB_RUN_ATTEMPT) > 1,
+		isTerminal: status === STATUS_MERGED || status === STATUS_CLOSED,
 		pr,
 		prKey: `${pr.owner}/${pr.repo}#${pr.num}`,
 	};
@@ -587,14 +578,10 @@ async function findMatches(slack, memo, prMatches, job) {
 // in sync per iteration so a mid-loop throw doesn't lose discovered work
 // or leave a terminal PR's entry stranded.
 async function applyReactions(slack, memo, prMatches, job, matches) {
-	const isTerminal =
-		job.status === STATUS_MERGED || job.status === STATUS_CLOSED;
 	const needsFlipCleanup = job.removeEmoji && !job.isRerun && matches.length;
 	const ctx = {
-		addEmoji: job.addEmoji,
-		removeEmoji: job.removeEmoji,
-		isRerun: job.isRerun,
 		slack,
+		job,
 		botUserId: needsFlipCleanup
 			? await memo.ensure("botUserId", BOT_USER_ID_TTL_S, () =>
 					fetchBotUserId(slack),
@@ -603,21 +590,20 @@ async function applyReactions(slack, memo, prMatches, job, matches) {
 	};
 
 	const toReact = matches.slice(0, REACTIONS_PER_RUN_CAP);
-	const overflow = matches.slice(REACTIONS_PER_RUN_CAP);
-	if (overflow.length) {
+	if (matches.length > REACTIONS_PER_RUN_CAP) {
 		console.warn(
-			`reactions-per-run cap (${REACTIONS_PER_RUN_CAP}) reached; ${overflow.length} kept in cache for next run`,
+			`reactions-per-run cap (${REACTIONS_PER_RUN_CAP}) reached; ${matches.length - REACTIONS_PER_RUN_CAP} kept in cache for next run`,
 		);
 	}
 
 	// Persist the full set up-front so an early throw still leaves the
 	// discovered matches in cache for the next run to retry.
-	let alive = [...toReact, ...overflow];
+	let alive = [...matches];
 	prMatches.set(job.prKey, alive);
 
 	for (const m of toReact) {
 		const result = await reactToMatch(ctx, m);
-		if (!keepsMatch(result)) {
+		if (STALE_MATCH_ERRORS.has(result.error)) {
 			alive = alive.filter((x) => x !== m);
 			prMatches.set(job.prKey, alive);
 		}
@@ -625,7 +611,7 @@ async function applyReactions(slack, memo, prMatches, job, matches) {
 
 	// Clean completion: terminal events drop the entry entirely; non-terminal
 	// runs that left nothing alive also drop (next event re-discovers).
-	if (isTerminal || !alive.length) prMatches.delete(job.prKey);
+	if (job.isTerminal || !alive.length) prMatches.delete(job.prKey);
 }
 
 async function main() {
