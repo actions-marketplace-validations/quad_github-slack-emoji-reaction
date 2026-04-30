@@ -179,26 +179,20 @@ export class Reactor {
 		await this.#applyReactions(await this.#findMatches());
 	}
 
-	// Returns the cached matches if we already have them, otherwise discovers
-	// fresh and caches them. Caching here (not in #applyReactions) means a
-	// throw mid-loop still leaves the discovered matches available next run.
 	async #findMatches() {
-		const prKey = this.#job.prKey;
-		const cached = this.#prMatches.get(prKey);
-		if (cached?.length) return cached;
-		const channels = await this.#memo.ensure(
-			"channels",
-			CHANNEL_LIST_TTL_S,
-			() => fetchChannels(this.#slack),
+		return this.#prMatches.computeIfAbsent(
+			this.#job.prKey,
+			PR_STALE_TTL_S,
+			async () =>
+				discoverMatches(
+					this.#slack,
+					this.#memo,
+					this.#job.pr,
+					await this.#memo.computeIfAbsent("channels", CHANNEL_LIST_TTL_S, () =>
+						fetchChannels(this.#slack),
+					),
+				),
 		);
-		const matches = await discoverMatches(
-			this.#slack,
-			this.#memo,
-			this.#job.pr,
-			channels,
-		);
-		this.#prMatches.set(prKey, matches);
-		return matches;
 	}
 
 	// React to as many matches as the per-run cap allows; the rest roll
@@ -255,7 +249,7 @@ export class Reactor {
 			(r) => r.name === this.#job.removeEmoji,
 		);
 		if (!opp) return;
-		const botUserId = await this.#memo.ensure(
+		const botUserId = await this.#memo.computeIfAbsent(
 			"botUserId",
 			BOT_USER_ID_TTL_S,
 			() => fetchBotUserId(this.#slack),

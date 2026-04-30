@@ -276,20 +276,20 @@ test("slack.call: invalid_auth response is thrown as FatalError", async () => {
 
 // ---------------------------------------------------------------- Memo
 
-test("Memo.ensure: caches first call, skips fetcher on subsequent calls within TTL", async () => {
+test("Memo.computeIfAbsent: caches first call, skips fetcher on subsequent calls within TTL", async () => {
 	const memo = new Memo({});
 	let calls = 0;
 	const fetcher = async () => ++calls;
-	assert.equal(await memo.ensure("k", 60, fetcher), 1);
-	assert.equal(await memo.ensure("k", 60, fetcher), 1);
+	assert.equal(await memo.computeIfAbsent("k", 60, fetcher), 1);
+	assert.equal(await memo.computeIfAbsent("k", 60, fetcher), 1);
 	assert.equal(calls, 1);
 });
 
-test("Memo.ensure: refetches once the cell's age exceeds the TTL", async () => {
+test("Memo.computeIfAbsent: refetches once the cell's age exceeds the TTL", async () => {
 	// Seed a stale cell (refreshedAt 1h ago, TTL 60s).
 	const stale = Math.floor(Date.now() / 1000) - 3600;
 	const memo = new Memo({ k: { value: "old", refreshedAt: stale } });
-	const result = await memo.ensure("k", 60, async () => "fresh");
+	const result = await memo.computeIfAbsent("k", 60, async () => "fresh");
 	assert.equal(result, "fresh");
 });
 
