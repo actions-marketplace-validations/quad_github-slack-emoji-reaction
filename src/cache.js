@@ -56,7 +56,10 @@ export class CacheClient {
 			if (!meta?.archiveLocation) return null;
 			const blob = await fetch(meta.archiveLocation, { signal });
 			return blob.ok ? await blob.json() : null;
-		} catch {
+		} catch (e) {
+			// Deadline-driven aborts propagate so the run exits cleanly.
+			if (e instanceof DOMException) throw e;
+			console.warn(`cache restore failed: ${e.message}`);
 			return null;
 		}
 	}
@@ -69,8 +72,10 @@ export class CacheClient {
 			if (!cacheId) return;
 			if (!(await this.#upload(cacheId, body))) return;
 			await this.#commit(cacheId, body.length);
-		} catch {
-			// swallow
+		} catch (e) {
+			// finally-context: must not propagate or we'd mask the original
+			// error. Log so real bugs in save aren't invisible.
+			console.warn(`cache save failed: ${e.message}`);
 		}
 	}
 
