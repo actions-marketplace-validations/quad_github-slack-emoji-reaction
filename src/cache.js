@@ -12,16 +12,24 @@ export class CacheClient {
 
 	constructor() {
 		const env = process.env;
-		const raw = env.ACTIONS_CACHE_URL;
-		const root = raw && new URL(raw.endsWith("/") ? raw : `${raw}/`);
-		this.#base = root && new URL("_apis/artifactcache/", root);
-		this.#token = env.ACTIONS_RUNTIME_TOKEN || "";
+		const url = env.ACTIONS_CACHE_URL;
+		const token = env.ACTIONS_RUNTIME_TOKEN;
+		// Disabled if either env var is missing OR the URL is malformed —
+		// any of these mean we can't talk to the cache; degrade silently.
+		if (!url || !token || !URL.canParse(url)) {
+			this.#enabled = false;
+			return;
+		}
+		// new URL(relative, base) needs a trailing slash on base or it'd
+		// resolve relative as a sibling of the last path segment.
+		this.#base = new URL("_apis/artifactcache/", url.replace(/\/?$/, "/"));
+		this.#token = token;
 		this.#headers = {
-			Authorization: `Bearer ${this.#token}`,
+			Authorization: `Bearer ${token}`,
 			Accept: "application/json;api-version=6.0-preview.1",
 		};
-		this.#enabled = !!this.#base && !!this.#token;
 		this.#runKey = `${env.GITHUB_RUN_ID || "norunid"}-${env.GITHUB_RUN_ATTEMPT || "1"}`;
+		this.#enabled = true;
 	}
 
 	#url(path) {
