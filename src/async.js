@@ -1,40 +1,21 @@
 // AbortSignal-aware sleep until a wall-clock deadline (Date.now() ms).
-// Idempotent under retries: pass the same deadline through and the total
-// wait stays bounded, however many times callers re-enter the wait.
-export const sleepUntil = (deadlineMs, signal) =>
-	new Promise((resolve, reject) => {
-		if (signal.aborted) return reject(signal.reason);
-		const remaining = deadlineMs - Date.now();
-		if (remaining <= 0) return resolve();
-		const timer = setTimeout(resolve, remaining);
-		signal.addEventListener(
-			"abort",
-			() => {
-				clearTimeout(timer);
-				reject(signal.reason);
-			},
-			{ once: true },
-		);
-	});
-
-// Race a promise against a signal: rejects with the signal's reason if it
-// fires before the promise settles.
-export async function abortable(promise, signal) {
-	if (signal.aborted) throw signal.reason;
-	return new Promise((resolve, reject) => {
-		const onAbort = () => reject(signal.reason);
-		signal.addEventListener("abort", onAbort, { once: true });
-		promise.then(
-			(v) => {
-				signal.removeEventListener("abort", onAbort);
-				resolve(v);
-			},
-			(e) => {
-				signal.removeEventListener("abort", onAbort);
-				reject(e);
-			},
-		);
-	});
+// Idempotent under retries: passing the same deadline through and re-
+// entering doesn't extend the total wait.
+export function sleepUntil(deadlineMs, signal) {
+	if (signal.aborted) return Promise.reject(signal.reason);
+	const remaining = deadlineMs - Date.now();
+	if (remaining <= 0) return Promise.resolve();
+	const { promise, resolve, reject } = Promise.withResolvers();
+	const onAbort = () => {
+		clearTimeout(timer);
+		reject(signal.reason);
+	};
+	const timer = setTimeout(() => {
+		signal.removeEventListener("abort", onAbort);
+		resolve();
+	}, remaining);
+	signal.addEventListener("abort", onAbort, { once: true });
+	return promise;
 }
 
 // Invoke `fn` up to `maxAttempts`. On a thrown error, ask `isRetryable`;
