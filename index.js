@@ -124,11 +124,14 @@ export function prContext(payload) {
 	return { owner, repo, num };
 }
 
-// Thrown for any condition that should fail the workflow with an
-// operator-facing message but no stack trace. The entrypoint catches
-// and prints the message; everything else propagates to Node's default
-// unhandled-rejection handler (stack + non-zero exit).
-class FatalError extends Error {}
+// Operator-fixable failures: top-level catch prints the message and exits 1
+// without a stack. Anything else propagates as an unhandled rejection.
+class FatalError extends Error {
+	static notNull(value, message) {
+		if (!value) throw new FatalError(message);
+		return value;
+	}
+}
 
 export class AuthError extends FatalError {
 	constructor(code) {
@@ -479,15 +482,15 @@ export async function discoverMatches(slack, pr, channels) {
 	return matches;
 }
 
-function warnIfUntolerated(prefix, res) {
+function warnIfUntoleratedError(res, prefix) {
 	if (!res.ok && !TOLERATED_REACTION_ERRORS.has(res.error)) {
 		console.warn(`${prefix}: ${res.error}`);
 	}
+	return res;
 }
 
-// One run's worth of reaction work, parameterized by the four deps that
-// otherwise thread through every step. Methods compose discover → react
-// → cache-update without re-passing the bundle.
+// One run's worth of reaction work; bundles the deps that would otherwise
+// thread through every step.
 export class Reactor {
 	#slack;
 	#memo;
@@ -520,8 +523,7 @@ export class Reactor {
 	// in sync per iteration so a mid-loop throw doesn't lose discovered work
 	// or leave a terminal PR's entry stranded.
 	async #applyReactions(matches) {
-		const job = this.#job;
-		const prMatches = this.#prMatches;
+		const prKey = this.#job.prKey;
 		const toReact = matches.slice(0, REACTIONS_PER_RUN_CAP);
 		if (matches.length > REACTIONS_PER_RUN_CAP) {
 			console.warn(
@@ -532,81 +534,80 @@ export class Reactor {
 		// Persist the full set up-front so an early throw still leaves the
 		// discovered matches in cache for the next run to retry.
 		let surviving = [...matches];
-		prMatches.set(job.prKey, surviving);
+		this.#prMatches.set(prKey, surviving);
 
 		for (const m of toReact) {
 			const result = await this.#reactToMatch(m);
 			if (STALE_MATCH_ERRORS.has(result.error)) {
 				surviving = surviving.filter((x) => x !== m);
-				prMatches.set(job.prKey, surviving);
+				this.#prMatches.set(prKey, surviving);
 			}
 		}
 
-		if (job.isTerminal || !surviving.length) prMatches.delete(job.prKey);
+		if (this.#job.isTerminal || !surviving.length) {
+			this.#prMatches.delete(prKey);
+		}
 	}
 
 	async #reactToMatch(match) {
-		const where = `${match.channel}/${match.ts}`;
 		await this.#flipCleanup(match);
-		const add = await this.#slack.call("reactions.add", {
-			channel: match.channel,
-			timestamp: match.ts,
-			name: this.#job.addEmoji,
-		});
-		warnIfUntolerated(`reactions.add ${where} ${this.#job.addEmoji}`, add);
-		return { ok: !!add.ok, error: add.error };
+		return warnIfUntoleratedError(
+			await this.#slack.call("reactions.add", {
+				channel: match.channel,
+				timestamp: match.ts,
+				name: this.#job.addEmoji,
+			}),
+			`reactions.add ${match.channel}/${match.ts} ${this.#job.addEmoji}`,
+		);
 	}
 
 	// approved↔changes-requested is the only flippable pair. Remove the
 	// opposite emoji only if our own bot put it there. Skipped on re-runs
 	// so a stale replay can't reverse a real later state.
 	async #flipCleanup(match) {
-		const job = this.#job;
-		const slack = this.#slack;
-		if (job.isRerun || !job.removeEmoji) return;
+		if (this.#job.isRerun || !this.#job.removeEmoji) return;
 
 		const where = `${match.channel}/${match.ts}`;
-		const got = await slack.call("reactions.get", {
-			channel: match.channel,
-			timestamp: match.ts,
-			full: true,
-		});
-		if (!got.ok) {
-			warnIfUntolerated(`reactions.get ${where}`, got);
-			return;
-		}
-		const opp = got.message?.reactions?.find((r) => r.name === job.removeEmoji);
+		const got = warnIfUntoleratedError(
+			await this.#slack.call("reactions.get", {
+				channel: match.channel,
+				timestamp: match.ts,
+				full: true,
+			}),
+			`reactions.get ${where}`,
+		);
+		if (!got.ok) return;
+		const opp = got.message?.reactions?.find(
+			(r) => r.name === this.#job.removeEmoji,
+		);
 		if (!opp) return;
 		const botUserId = await this.#memo.ensure(
 			"botUserId",
 			BOT_USER_ID_TTL_S,
-			() => fetchBotUserId(slack),
+			() => fetchBotUserId(this.#slack),
 		);
 		if (!opp.users.includes(botUserId)) return;
 
-		const rm = await slack.call("reactions.remove", {
-			channel: match.channel,
-			timestamp: match.ts,
-			name: job.removeEmoji,
-		});
-		warnIfUntolerated(`reactions.remove ${where} ${job.removeEmoji}`, rm);
+		warnIfUntoleratedError(
+			await this.#slack.call("reactions.remove", {
+				channel: match.channel,
+				timestamp: match.ts,
+				name: this.#job.removeEmoji,
+			}),
+			`reactions.remove ${where} ${this.#job.removeEmoji}`,
+		);
 	}
 }
 
-// Read env + payload into a job spec. Throws FatalError on operator-fixable
-// problems; returns null on routine skips (unmapped event, unconfigured
-// emoji, fork PR with no secrets); otherwise returns the job to run.
 function readJob() {
-	const eventPath = process.env.GITHUB_EVENT_PATH;
-	if (!eventPath)
-		throw new FatalError(
-			"GITHUB_EVENT_PATH not set; not running inside GitHub Actions",
-		);
-	const eventName = process.env.GITHUB_EVENT_NAME;
-	if (!eventName)
-		throw new FatalError(
-			"GITHUB_EVENT_NAME not set; not running inside GitHub Actions",
-		);
+	const eventPath = FatalError.notNull(
+		process.env.GITHUB_EVENT_PATH,
+		"GITHUB_EVENT_PATH not set; not running inside GitHub Actions",
+	);
+	const eventName = FatalError.notNull(
+		process.env.GITHUB_EVENT_NAME,
+		"GITHUB_EVENT_NAME not set; not running inside GitHub Actions",
+	);
 	const payload = JSON.parse(fs.readFileSync(eventPath, "utf8"));
 
 	const status = deriveStatus(eventName, payload);
@@ -616,20 +617,24 @@ function readJob() {
 
 	const token = input("slack-token");
 	if (!token) {
-		// Fork PRs run with empty secrets by design — that's not a misconfig.
+		// Fork PRs run with empty secrets
 		if (payload.pull_request?.head?.repo?.fork) return null;
 		throw new FatalError("slack-token is missing; set the SLACK_TOKEN secret");
 	}
 
-	const pr = prContext(payload);
-	if (!pr) throw new FatalError("could not derive PR context from payload");
+	const pr = FatalError.notNull(
+		prContext(payload),
+		"could not derive PR context from payload",
+	);
 
 	const opposite = FLIP_OPPOSITE[status];
+	const removeEmoji = opposite ? input(`emoji-${opposite}`) : "";
+
 	return {
 		status,
 		token,
 		addEmoji,
-		removeEmoji: opposite ? input(`emoji-${opposite}`) : "",
+		removeEmoji,
 		isRerun: Number(process.env.GITHUB_RUN_ATTEMPT) > 1,
 		isTerminal: status === STATUS_MERGED || status === STATUS_CLOSED,
 		pr,
@@ -650,10 +655,6 @@ async function main() {
 
 	prMatches.sweepStale(nowS() - PR_STALE_TTL_S);
 	const reactor = new Reactor({ slack, memo, prMatches, job });
-
-	// Every mutation Reactor makes (memo.ensure, prMatches.set/delete) leaves
-	// the structure individually consistent, so saving in `finally` always
-	// writes a valid snapshot — partial progress survives a throw.
 	try {
 		await reactor.run();
 	} finally {
