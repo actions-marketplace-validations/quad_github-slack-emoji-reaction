@@ -18,8 +18,8 @@ Inspired by [jybp/github-slack-emoji-reaction](https://github.com/jybp/github-sl
    ```yaml
    name: Slack Emoji Reactions
    on:
-     pull_request:        { types: [closed] }
-     pull_request_review: { types: [submitted] }
+     pull_request:        { types: [closed, reopened] }
+     pull_request_review: { types: [submitted, dismissed] }
 
    permissions:
      pull-requests: read
@@ -59,8 +59,6 @@ For nicer GitHub-themed Slack emoji, see [22a/slack-github-emoji](https://github
     emoji-merged: merged
     emoji-closed: closed
 ```
-
-Behavior: review dismissals are always ignored. `approved` ↔ `changes-requested` flip; `merged` joins the existing reactions instead of replacing.
 
 ## Limits
 
