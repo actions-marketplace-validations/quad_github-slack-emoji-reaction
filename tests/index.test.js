@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
+import { CacheClient } from "../src/cache.js";
 import { FatalError } from "../src/errors.js";
 import { deriveStatus, prContext, Reactor } from "../src/index.js";
 import { Memo } from "../src/memo.js";
@@ -270,6 +271,27 @@ test("Memo.ensure: refetches once the cell's age exceeds the TTL", async () => {
 	const memo = new Memo({ k: { value: "old", refreshedAt: stale } });
 	const result = await memo.ensure("k", 60, async () => "fresh");
 	assert.equal(result, "fresh");
+});
+
+// ---------------------------------------------------------------- CacheClient
+
+test("CacheClient: no-op when ACTIONS_CACHE_URL is missing", async () => {
+	const origUrl = process.env.ACTIONS_CACHE_URL;
+	const origToken = process.env.ACTIONS_RUNTIME_TOKEN;
+	delete process.env.ACTIONS_CACHE_URL;
+	delete process.env.ACTIONS_RUNTIME_TOKEN;
+	try {
+		const cache = new CacheClient();
+		assert.equal(
+			await cache.restore(new AbortController().signal),
+			null,
+			"restore should return null when cache is unavailable",
+		);
+		await cache.save({ memo: {}, prMatches: {} });
+	} finally {
+		if (origUrl !== undefined) process.env.ACTIONS_CACHE_URL = origUrl;
+		if (origToken !== undefined) process.env.ACTIONS_RUNTIME_TOKEN = origToken;
+	}
 });
 
 // ---------------------------------------------------------------- Reactor.run (flip cleanup, with cached match)

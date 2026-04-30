@@ -82,10 +82,23 @@ async function fetchChannels(slack) {
 	return out;
 }
 
+function shuffle(arr) {
+	const a = [...arr];
+	for (let i = a.length - 1; i > 0; i--) {
+		const j = Math.floor(Math.random() * (i + 1));
+		[a[i], a[j]] = [a[j], a[i]];
+	}
+	return a;
+}
+
 async function discoverMatches(slack, memo, pr, channels) {
-	if (channels.length > MAX_CHANNELS_PER_RUN) {
+	// Shuffle so consecutive events for the same PR sample different
+	// channels; bots invited to many channels get full coverage across
+	// runs instead of always missing the same tail.
+	const sample = shuffle(channels);
+	if (sample.length > MAX_CHANNELS_PER_RUN) {
 		console.warn(
-			`channels-per-run cap (${MAX_CHANNELS_PER_RUN}) reached; skipped ${channels.length - MAX_CHANNELS_PER_RUN} remaining`,
+			`channels-per-run cap (${MAX_CHANNELS_PER_RUN}) reached; ${sample.length - MAX_CHANNELS_PER_RUN} not scanned this run`,
 		);
 	}
 	// JSON.stringify flattens every Slack message shape (text <url>,
@@ -97,7 +110,7 @@ async function discoverMatches(slack, memo, pr, channels) {
 
 	const matches = [];
 	const oldest = String(Math.floor(Date.now() / 1000) - HISTORY_LOOKBACK_S);
-	for (const ch of channels.slice(0, MAX_CHANNELS_PER_RUN)) {
+	for (const ch of sample.slice(0, MAX_CHANNELS_PER_RUN)) {
 		for await (const res of slack.paginate(
 			"conversations.history",
 			{ channel: ch.id, oldest, limit: 200 },
