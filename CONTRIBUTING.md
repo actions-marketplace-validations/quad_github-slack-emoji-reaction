@@ -10,29 +10,19 @@ npm ci
 ## Tests
 
 ```sh
-npm run ci                # biome check + node --test
-npx biome check --write   # autofix + format
+npm run ci                # biome check --write + node --test (incl. integration)
 ```
 
-Unit tests cover the pure helpers (`deriveStatus`, `prContext`,
-`matchesPullUrl`, `urlsFromMessage`, `tokenizeAngles`) and the dynamic
-surface (`SlackClient.call` retry, `fetchChannels` pagination,
-`discoverMatches` scan + caps, `fetchBotUserId` auth, `Memo.ensure`
-TTL, `reactToMatch` flip cleanup with various bot-id and re-run
-permutations) via a scripted fetch shim.
+Unit tests in `index.test.js` cover the pure helpers and the dynamic
+surface (`SlackClient.call` retry, pagination, `Memo.ensure` TTL,
+`Reactor` flip cleanup, etc.) via a scripted fetch shim.
 
-## Integration tests
-
-`scripts/act-test.sh` replays a vendored event payload against the local
-action via [nektos/act](https://github.com/nektos/act). Uses a fake Slack
-token so no real Slack traffic happens — it asserts the action's wiring
-end-to-end (input parsing, status derivation, Slack auth attempt,
-auth-error clean exit). Requires Docker.
-
-```sh
-./scripts/act-test.sh pull_request_closed
-./scripts/act-test.sh pull_request_review_submitted
-```
+`integration.test.js` drives [nektos/act](https://github.com/nektos/act)
+against a vendored event payload — fake Slack token, asserts the action
+reaches auth and exits with the `AuthError` message. Covers wiring
+unit tests can't (`action.yml` dispatch, `INPUT_*` env injection,
+`node24` runtime, top-level `FatalError` catch). Requires Docker + act
+on `PATH` (mise installs both).
 
 ## Fixtures
 
