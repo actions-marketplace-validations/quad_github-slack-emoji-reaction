@@ -325,10 +325,7 @@ async function main() {
 }
 
 function* causeMessages(e) {
-	while (e) {
-		yield e.message;
-		e = e.cause;
-	}
+	for (let cur = e; cur; cur = cur.cause) yield cur.message;
 }
 
 if (import.meta.main) {
