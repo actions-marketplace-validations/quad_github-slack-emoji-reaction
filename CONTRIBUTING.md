@@ -19,8 +19,8 @@ surface (`SlackClient.call` retry, pagination, `Memo.ensure` TTL,
 
 `integration.test.js` spawns `node index.js` the way GHA does
 (`GITHUB_EVENT_*` + `INPUT_*` env vars, vendored fixture payload, fake
-token) and asserts the action reaches Slack auth and exits with the
-`AuthError` message. Covers the wiring unit tests can't reach: the
+token) and asserts the action reaches Slack auth and exits 1 with the
+formatted error message. Covers the wiring unit tests can't reach: the
 top-level catch, FatalError → exit 1, INPUT_* env reading.
 
 ## Fixtures
@@ -36,16 +36,17 @@ commit. See `fixtures/SOURCE.md` for the pin and refresh recipe.
 - **Constants** — Slack endpoint, status names, error sets, caps and TTLs.
 - **URL + event helpers** — `tokenizeAngles`, `urlsFromMessage`,
   `matchesPullUrl` (URLPattern-based), `deriveStatus`, `prContext`.
-- **`FatalError` / `AuthError`** — operator-fixable errors thrown with
-  pre-built messages; caught at the top level.
-- **`SlackClient`** — `call` with self-pacing, 429 retry, and inline
-  auth-error detection.
+- **`FatalError`** — operator-fixable errors thrown with pre-built
+  messages; caught at the top level. `FatalError.notNull(v, msg)` for
+  required-input checks.
+- **`SlackClient`** — `call` with self-pacing, 429 retry, inline
+  auth-error detection, and `paginate(method, params, {maxPages})` as
+  an async-iterable cursor walker.
 - **`CacheClient`** — restore/save against the GHA Cache v1 API.
 - **`Memo`** — keyed `{value, refreshedAt}` cells with TTL-aware
-  `ensure`, `sweepStale`, `capByOldest`. Used for both memoized I/O and
+  `ensure`, `evictOlderThan`, `evictOldestPast`. Used for both memoized I/O and
   the per-PR match map.
-- **Slack ops** — `fetchBotUserId`, `fetchChannels`, `paginate`,
-  `discoverMatches`, `flipCleanup`, `reactToMatch`.
+- **Slack ops** — `fetchBotUserId`, `fetchChannels`, `discoverMatches`.
 - **`readJob`** + **`main`** — read env/payload into a job spec, then
   drive sweep → discover → react → save.
 

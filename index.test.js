@@ -4,9 +4,9 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-	AuthError,
 	deriveStatus,
 	discoverMatches,
+	FatalError,
 	fetchBotUserId,
 	fetchChannels,
 	Memo,
@@ -270,7 +270,7 @@ const setupReactor = ({ slack, job = {}, botUserId = null }) => {
 			addEmoji: "eyes",
 			removeEmoji: "",
 			isRerun: false,
-			isTerminal: false,
+			closesPR: false,
 			prKey,
 			pr: { owner: "o", repo: "r", num: 1 },
 			...job,
@@ -511,13 +511,13 @@ test("discoverMatches: extracts PR URL from blocks even when text is empty", asy
 
 // ---------------------------------------------------------------- fetchBotUserId
 
-test("fetchBotUserId: throws AuthError on invalid_auth (so caller can clean-exit)", async () => {
+test("fetchBotUserId: throws FatalError on invalid_auth (so caller can clean-exit)", async () => {
 	const { slack } = slackFor({
 		"auth.test": [{ body: { ok: false, error: "invalid_auth" } }],
 	});
 	await assert.rejects(
 		fetchBotUserId(slack),
-		(e) => e instanceof AuthError && e.code === "invalid_auth",
+		(e) => e instanceof FatalError && /invalid_auth/.test(e.message),
 	);
 });
 
@@ -622,13 +622,13 @@ test("Reactor.run: stale-match errors (channel_not_found) prune the entry from c
 	assert.equal(prMatches.get(prKey), undefined);
 });
 
-test("Reactor.run: invalid_auth on reactions.add propagates as AuthError", async () => {
+test("Reactor.run: invalid_auth on reactions.add propagates as FatalError", async () => {
 	const { slack } = slackFor({
 		"reactions.add": [{ body: { ok: false, error: "invalid_auth" } }],
 	});
 	const { reactor } = setupReactor({ slack });
 	await assert.rejects(
 		reactor.run(),
-		(e) => e instanceof AuthError && e.code === "invalid_auth",
+		(e) => e instanceof FatalError && /invalid_auth/.test(e.message),
 	);
 });

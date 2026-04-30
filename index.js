@@ -1,7 +1,5 @@
 import fs from "node:fs";
 
-const SLACK_API = "https://slack.com/api/";
-
 const STATUS_APPROVED = "approved";
 const STATUS_CHANGES_REQUESTED = "changes-requested";
 const STATUS_MERGED = "merged";
@@ -18,17 +16,6 @@ const TOLERATED_REACTION_ERRORS = new Set([
 	"not_in_channel",
 	"channel_not_found",
 	"message_not_found",
-]);
-const STALE_MATCH_ERRORS = new Set([
-	"not_in_channel",
-	"channel_not_found",
-	"message_not_found",
-]);
-const AUTH_ERRORS = new Set([
-	"invalid_auth",
-	"token_revoked",
-	"account_inactive",
-	"not_authed",
 ]);
 
 const BOT_USER_ID_TTL_S = 30 * 24 * 3600;
@@ -126,33 +113,34 @@ export function prContext(payload) {
 
 // Operator-fixable failures: top-level catch prints the message and exits 1
 // without a stack. Anything else propagates as an unhandled rejection.
-class FatalError extends Error {
+export class FatalError extends Error {
 	static notNull(value, message) {
 		if (!value) throw new FatalError(message);
 		return value;
 	}
 }
 
-export class AuthError extends FatalError {
-	constructor(code) {
-		super(`Slack auth error: ${code}. Refresh the SLACK_TOKEN secret.`);
-		this.code = code;
-	}
-}
-
 export class SlackClient {
+	static #SLACK_API = "https://slack.com/api/";
+	static #AUTH_ERRORS = new Set([
+		"invalid_auth",
+		"token_revoked",
+		"account_inactive",
+		"not_authed",
+	]);
+
 	#token;
 	#fetch;
 	#apiBase;
 	#paceMs;
 	#maxRetries;
 	#retryAfterCapS;
-	#lastCallAt = 0;
+	#nextCallAt = 0;
 
 	constructor({
 		token,
 		fetch = globalThis.fetch,
-		apiBase = SLACK_API,
+		apiBase = SlackClient.#SLACK_API,
 		paceMs = SLACK_PACE_MS,
 		maxRetries = MAX_RETRIES,
 		retryAfterCapS = RETRY_AFTER_CAP_S,
@@ -166,9 +154,9 @@ export class SlackClient {
 	}
 
 	async #pace() {
-		const wait = this.#paceMs - (Date.now() - this.#lastCallAt);
+		const wait = this.#nextCallAt - Date.now();
 		if (wait > 0) await sleep(wait);
-		this.#lastCallAt = Date.now();
+		this.#nextCallAt = Date.now() + this.#paceMs;
 	}
 
 	// Outcome:
@@ -207,8 +195,10 @@ export class SlackClient {
 			);
 			return { kind: "ratelimited", waitMs: secs * 1000, body };
 		}
-		if (body?.ok === false && AUTH_ERRORS.has(body.error)) {
-			throw new AuthError(body.error);
+		if (body?.ok === false && SlackClient.#AUTH_ERRORS.has(body.error)) {
+			throw new FatalError(
+				`Slack auth error: ${body.error}. Refresh the SLACK_TOKEN secret.`,
+			);
 		}
 		return { kind: "ok", body };
 	}
@@ -230,6 +220,22 @@ export class SlackClient {
 			await sleep(outcome.waitMs);
 		}
 		return outcome.body;
+	}
+
+	// Yields successive Slack pages, threading cursor through. Caps at
+	// `maxPages` if given; otherwise drains to completion. Stops on
+	// non-ok response or empty next_cursor.
+	async *paginate(method, baseParams, { maxPages = Infinity } = {}) {
+		let cursor = "";
+		for (let page = 0; page < maxPages; page++) {
+			const params = { ...baseParams };
+			if (cursor) params.cursor = cursor;
+			const res = await this.call(method, params);
+			yield res;
+			if (!res.ok) return;
+			cursor = res.response_metadata?.next_cursor || "";
+			if (!cursor) return;
+		}
 	}
 }
 
@@ -384,18 +390,18 @@ export class Memo {
 		return value;
 	}
 
-	// Evict entries last refreshed before `cutoffS`.
-	sweepStale(cutoffS) {
+	// Eviction strategy: drop entries last refreshed before `cutoffS`.
+	evictOlderThan(cutoffS) {
 		this.#cells = Object.fromEntries(
 			Object.entries(this.#cells).filter(([, v]) => v.refreshedAt >= cutoffS),
 		);
 	}
 
-	// Keep the `max` most-recently-refreshed entries (oldest refreshedAt
-	// dropped first). Returns count evicted. This is LRU-shaped only when
-	// every interaction with a key ends in a set — true for prMatches but
-	// not in general; readers shouldn't bank on access-time tracking.
-	capByOldest(max) {
+	// Eviction strategy: keep the `max` most-recently-refreshed entries
+	// (oldest refreshedAt dropped first). Returns count evicted. LRU-shaped
+	// only when every interaction with a key ends in a set — true for
+	// prMatches but not in general; readers shouldn't bank on it.
+	evictOldestPast(max) {
 		const keys = Object.keys(this.#cells);
 		if (keys.length <= max) return 0;
 		keys.sort(
@@ -417,25 +423,9 @@ export async function fetchBotUserId(slack) {
 	return res.user_id;
 }
 
-// Yields successive Slack pages, threading cursor through. Consumers
-// drive termination: drain to completion, cap page count, break on hit,
-// throw on error — all just standard for-await control flow.
-async function* paginate(slack, method, baseParams) {
-	let cursor = "";
-	while (true) {
-		const params = { ...baseParams };
-		if (cursor) params.cursor = cursor;
-		const res = await slack.call(method, params);
-		yield res;
-		if (!res.ok) return;
-		cursor = res.response_metadata?.next_cursor || "";
-		if (!cursor) return;
-	}
-}
-
 export async function fetchChannels(slack) {
 	const out = [];
-	for await (const res of paginate(slack, "conversations.list", {
+	for await (const res of slack.paginate("conversations.list", {
 		types: "public_channel,private_channel",
 		exclude_archived: true,
 		limit: 200,
@@ -457,12 +447,11 @@ export async function discoverMatches(slack, pr, channels) {
 	const matches = [];
 	const oldest = String(nowS() - HISTORY_LOOKBACK_S);
 	for (const ch of channels.slice(0, MAX_CHANNELS_PER_RUN)) {
-		let page = 0;
-		for await (const res of paginate(slack, "conversations.history", {
-			channel: ch.id,
-			oldest,
-			limit: 200,
-		})) {
+		for await (const res of slack.paginate(
+			"conversations.history",
+			{ channel: ch.id, oldest, limit: 200 },
+			{ maxPages: HISTORY_PAGES_PER_CHANNEL },
+		)) {
 			if (!res.ok) {
 				console.warn(
 					`conversations.history ${ch.id}(${ch.name}): ${res.error}`,
@@ -476,7 +465,6 @@ export async function discoverMatches(slack, pr, channels) {
 				matches.push({ channel: ch.id, ts: hit.ts });
 				break;
 			}
-			if (++page >= HISTORY_PAGES_PER_CHANNEL) break;
 		}
 	}
 	return matches;
@@ -492,6 +480,12 @@ function warnIfUntoleratedError(res, prefix) {
 // One run's worth of reaction work; bundles the deps that would otherwise
 // thread through every step.
 export class Reactor {
+	static #STALE_MATCH_ERRORS = new Set([
+		"not_in_channel",
+		"channel_not_found",
+		"message_not_found",
+	]);
+
 	#slack;
 	#memo;
 	#prMatches;
@@ -538,13 +532,13 @@ export class Reactor {
 
 		for (const m of toReact) {
 			const result = await this.#reactToMatch(m);
-			if (STALE_MATCH_ERRORS.has(result.error)) {
+			if (Reactor.#STALE_MATCH_ERRORS.has(result.error)) {
 				surviving = surviving.filter((x) => x !== m);
 				this.#prMatches.set(prKey, surviving);
 			}
 		}
 
-		if (this.#job.isTerminal || !surviving.length) {
+		if (this.#job.closesPR || !surviving.length) {
 			this.#prMatches.delete(prKey);
 		}
 	}
@@ -636,7 +630,7 @@ function readJob() {
 		addEmoji,
 		removeEmoji,
 		isRerun: Number(process.env.GITHUB_RUN_ATTEMPT) > 1,
-		isTerminal: status === STATUS_MERGED || status === STATUS_CLOSED,
+		closesPR: status === STATUS_MERGED || status === STATUS_CLOSED,
 		pr,
 		prKey: `${pr.owner}/${pr.repo}#${pr.num}`,
 	};
@@ -653,12 +647,12 @@ async function main() {
 	const memo = new Memo(restored.memo);
 	const prMatches = new Memo(restored.prMatches);
 
-	prMatches.sweepStale(nowS() - PR_STALE_TTL_S);
+	prMatches.evictOlderThan(nowS() - PR_STALE_TTL_S);
 	const reactor = new Reactor({ slack, memo, prMatches, job });
 	try {
 		await reactor.run();
 	} finally {
-		const evicted = prMatches.capByOldest(MAX_PR_ENTRIES);
+		const evicted = prMatches.evictOldestPast(MAX_PR_ENTRIES);
 		if (evicted) console.warn(`pr-entries safety cap; evicted ${evicted}`);
 		await cache.save({ memo, prMatches });
 	}
