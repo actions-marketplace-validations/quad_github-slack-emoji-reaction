@@ -10,9 +10,8 @@ npm ci
 ## Tests
 
 ```sh
-npm test                  # biome check + node --test
-npm run lint              # biome only
-npm run format            # biome with --write
+npm run ci                # biome check + node --test
+npm run format            # biome check --write
 ```
 
 Unit tests cover the pure helpers (`deriveStatus`, `prContext`,
