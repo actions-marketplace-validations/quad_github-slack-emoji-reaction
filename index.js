@@ -467,35 +467,43 @@ export async function discoverMatches(slack, pr, channels) {
 	return matches;
 }
 
-export async function reactToMatch(ctx, match) {
-	const { addEmoji, removeEmoji, botUserId, isRerun, slack } = ctx;
-	const where = `${match.channel}/${match.ts}`;
+// approved↔changes-requested is the only flippable pair. Remove the
+// opposite emoji only if our own bot put it there. Skipped on re-runs
+// so a stale replay can't reverse a real later state.
+async function flipCleanup(ctx, match) {
+	const { removeEmoji, botUserId, isRerun, slack } = ctx;
+	if (isRerun || !removeEmoji) return;
 
-	// approved↔changes-requested is the only flippable pair. Remove the
-	// opposite emoji only if our own bot put it there. Skipped on re-runs
-	// so a stale replay can't reverse a real later state.
-	if (!isRerun && removeEmoji) {
-		const got = await slack.call("reactions.get", {
-			channel: match.channel,
-			timestamp: match.ts,
-			full: true,
-		});
-		if (got.ok) {
-			const opp = got.message?.reactions?.find((r) => r.name === removeEmoji);
-			if (opp?.users.includes(botUserId)) {
-				const rm = await slack.call("reactions.remove", {
-					channel: match.channel,
-					timestamp: match.ts,
-					name: removeEmoji,
-				});
-				if (!rm.ok && !TOLERATED_REACTION_ERRORS.has(rm.error)) {
-					console.warn(`reactions.remove ${where} ${removeEmoji}: ${rm.error}`);
-				}
-			}
-		} else if (!TOLERATED_REACTION_ERRORS.has(got.error)) {
+	const where = `${match.channel}/${match.ts}`;
+	const got = await slack.call("reactions.get", {
+		channel: match.channel,
+		timestamp: match.ts,
+		full: true,
+	});
+	if (!got.ok) {
+		if (!TOLERATED_REACTION_ERRORS.has(got.error)) {
 			console.warn(`reactions.get ${where}: ${got.error}`);
 		}
+		return;
 	}
+	const opp = got.message?.reactions?.find((r) => r.name === removeEmoji);
+	if (!opp?.users.includes(botUserId)) return;
+
+	const rm = await slack.call("reactions.remove", {
+		channel: match.channel,
+		timestamp: match.ts,
+		name: removeEmoji,
+	});
+	if (!rm.ok && !TOLERATED_REACTION_ERRORS.has(rm.error)) {
+		console.warn(`reactions.remove ${where} ${removeEmoji}: ${rm.error}`);
+	}
+}
+
+export async function reactToMatch(ctx, match) {
+	const { addEmoji, slack } = ctx;
+	const where = `${match.channel}/${match.ts}`;
+
+	await flipCleanup(ctx, match);
 
 	const add = await slack.call("reactions.add", {
 		channel: match.channel,
