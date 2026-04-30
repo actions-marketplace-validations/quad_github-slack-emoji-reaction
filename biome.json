@@ -6,26 +6,9 @@
 		"useIgnoreFile": true
 	},
 	"files": {
-		"ignoreUnknown": false,
-		"includes": ["**", "!fixtures/upstream", "!node_modules"]
-	},
-	"formatter": {
-		"enabled": true,
-		"indentStyle": "tab"
-	},
-	"linter": {
-		"enabled": true,
-		"rules": {
-			"recommended": true
-		}
-	},
-	"javascript": {
-		"formatter": {
-			"quoteStyle": "double"
-		}
+		"includes": ["**", "!tests/fixtures/upstream"]
 	},
 	"assist": {
-		"enabled": true,
 		"actions": {
 			"source": {
 				"organizeImports": "on"

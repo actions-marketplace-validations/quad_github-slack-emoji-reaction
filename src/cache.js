@@ -10,7 +10,6 @@ export class CacheClient {
 	static #VERSION = `${CacheClient.#BASE}-v1`;
 
 	#base;
-	#token;
 	#headers;
 	#enabled;
 	#runKey;
@@ -34,7 +33,6 @@ export class CacheClient {
 		// new URL(relative, base) needs a trailing slash on base or it'd
 		// resolve relative as a sibling of the last path segment.
 		this.#base = new URL("_apis/artifactcache/", url.replace(/\/?$/, "/"));
-		this.#token = token;
 		this.#headers = {
 			Authorization: `Bearer ${token}`,
 			Accept: "application/json;api-version=6.0-preview.1",
