@@ -19,9 +19,11 @@ by leaving the corresponding input unset.
 
 ### 1. Create the Slack app
 
-Go to <https://api.slack.com/apps>, **Create New App** → **From a manifest**,
-pick your workspace, paste [`manifest.yml`](./manifest.yml), install. From
-**OAuth & Permissions**, copy the **Bot User OAuth Token** (`xoxb-…`).
+1. Go to <https://api.slack.com/apps>.
+2. Click **Create New App** → **From a manifest**.
+3. Pick your workspace.
+4. Paste [`manifest.yml`](./manifest.yml) and install.
+5. From **OAuth & Permissions**, copy the **Bot User OAuth Token** (`xoxb-…`).
 
 > ⚠️ **Install in your own workspace; do not submit to the Slack Marketplace.**
 > Slack rate-limits `conversations.history` to 1 request/minute for newly
@@ -30,8 +32,9 @@ pick your workspace, paste [`manifest.yml`](./manifest.yml), install. From
 
 ### 2. Add the token
 
-In your repo: **Settings → Secrets and variables → Actions → New repository
-secret**, name `SLACK_TOKEN`, value the `xoxb-…` token.
+1. In your repo, go to **Settings → Secrets and variables → Actions**.
+2. Click **New repository secret**.
+3. Name it `SLACK_TOKEN` with the `xoxb-…` token as the value.
 
 ### 3. Invite the bot
 
