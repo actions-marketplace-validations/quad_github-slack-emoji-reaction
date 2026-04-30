@@ -41,11 +41,11 @@ Inspired by [jybp/github-slack-emoji-reaction](https://github.com/jybp/github-sl
 
 | Event you trigger on                              | Input                     | Default               |
 | ------------------------------------------------- | ------------------------- | --------------------- |
-| `pull_request_review.submitted` approved          | `emoji-approved`          | `white_check_mark` ✅ |
-| `pull_request_review.submitted` changes_requested | `emoji-changes-requested` | `warning` ⚠️          |
-| `pull_request_review.submitted` commented         | `emoji-commented`         | `speech_balloon` 💬   |
-| `pull_request.closed` (merged)                    | `emoji-merged`            | `rocket` 🚀           |
-| `pull_request.closed` (not merged)                | `emoji-closed`            | `x` ❌                |
+| `pull_request_review.submitted` approved          | `emoji-approved`          | ✅ `white_check_mark` |
+| `pull_request_review.submitted` changes_requested | `emoji-changes-requested` | ⚠️ `warning`          |
+| `pull_request_review.submitted` commented         | `emoji-commented`         | 💬 `speech_balloon`   |
+| `pull_request.closed` (merged)                    | `emoji-merged`            | 🚀 `rocket`           |
+| `pull_request.closed` (not merged)                | `emoji-closed`            | ❌ `x`                |
 
 Override any `emoji-*` input in the workflow `with:` block. Use bare names (no `:colons:`); custom workspace emoji works. Set an input to `""` to disable that status.
 
