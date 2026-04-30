@@ -77,7 +77,7 @@ export class SlackClient {
 				signal: this.#signal,
 			});
 		} catch (e) {
-			if (this.#signal.aborted) throw e;
+			if (e instanceof DOMException) throw e;
 			throw new NetworkError(e);
 		}
 		const body = await res.json();
