@@ -6,7 +6,7 @@ import { FatalError } from "./errors.js";
 // retry-after deadline so the retry loop knows when to wake.
 class RateLimitError extends Error {
 	constructor(body, deadlineMs) {
-		super(body.error || "ratelimited");
+		super();
 		this.body = body;
 		this.deadlineMs = deadlineMs;
 	}
@@ -16,7 +16,7 @@ class RateLimitError extends Error {
 // catch synthesises a Slack-shaped body on exhaustion.
 class NetworkError extends Error {
 	constructor(cause) {
-		super(cause.message);
+		super();
 		this.cause = cause;
 	}
 }
