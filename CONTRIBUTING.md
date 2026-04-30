@@ -17,8 +17,9 @@ npm run ci
 
 ```sh
 git tag vX.Y.Z && git push origin vX.Y.Z
-git tag -f v1 vX.Y.Z && git push -f origin v1
+git tag -f vX vX.Y.Z && git push -f origin vX
+gh release create vX.Y.Z --generate-notes
 ```
 
-Consumers pin `@v1`; the floating major tag is force-moved to the latest
-`v1.X.Y`.
+Consumers pin `@vX`; the floating major tag is force-moved to the latest
+`vX.Y.Z`.
