@@ -22,7 +22,7 @@ class NetworkError extends Error {
 
 export class SlackClient {
 	static #SLACK_API = "https://slack.com/api/";
-	static #MAX_RETRIES = 2;
+	static #MAX_ATTEMPTS = 3;
 	static #RETRY_AFTER_CAP_S = 60;
 	static #NETWORK_RETRY_MS = 1000;
 	static #AUTH_ERRORS = new Set([
@@ -45,7 +45,7 @@ export class SlackClient {
 	async call(method, params) {
 		try {
 			return await retry(() => this.#callOnce(method, params), {
-				maxAttempts: SlackClient.#MAX_RETRIES + 1,
+				maxAttempts: SlackClient.#MAX_ATTEMPTS,
 				signal: this.#signal,
 				isRetryable: (e) =>
 					e instanceof RateLimitError || e instanceof NetworkError,
