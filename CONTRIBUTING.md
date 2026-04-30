@@ -3,7 +3,7 @@
 ## Setup
 
 ```sh
-mise install              # node 24 + act from mise.toml
+mise install              # node 24.x via package.json devEngines
 npm ci
 ```
 
@@ -17,12 +17,11 @@ Unit tests in `index.test.js` cover the pure helpers and the dynamic
 surface (`SlackClient.call` retry, pagination, `Memo.ensure` TTL,
 `Reactor` flip cleanup, etc.) via a scripted fetch shim.
 
-`integration.test.js` drives [nektos/act](https://github.com/nektos/act)
-against a vendored event payload — fake Slack token, asserts the action
-reaches auth and exits with the `AuthError` message. Covers wiring
-unit tests can't (`action.yml` dispatch, `INPUT_*` env injection,
-`node24` runtime, top-level `FatalError` catch). Requires Docker + act
-on `PATH` (mise installs both).
+`integration.test.js` spawns `node index.js` the way GHA does
+(`GITHUB_EVENT_*` + `INPUT_*` env vars, vendored fixture payload, fake
+token) and asserts the action reaches Slack auth and exits with the
+`AuthError` message. Covers the wiring unit tests can't reach: the
+top-level catch, FatalError → exit 1, INPUT_* env reading.
 
 ## Fixtures
 
