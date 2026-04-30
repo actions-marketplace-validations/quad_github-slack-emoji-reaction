@@ -34,6 +34,9 @@ const HISTORY_LOOKBACK_S = 30 * 24 * 3600;
 const REACTIONS_PER_RUN_CAP = 50;
 const MAX_PR_ENTRIES = 10000;
 const RUN_DEADLINE_MS = 5 * 60 * 1000;
+// Slack's per-page limit on conversations.list/history. Default 100, max
+// 1000; 200 trades fewer pages for batches that aren't pathologically big.
+const SLACK_PAGE_SIZE = 200;
 
 export function deriveStatus(eventName, payload) {
 	if (eventName === "pull_request_review") {
@@ -77,7 +80,7 @@ async function fetchChannels(slack) {
 		{
 			types: "public_channel,private_channel",
 			exclude_archived: true,
-			limit: 200,
+			limit: SLACK_PAGE_SIZE,
 		},
 		Infinity,
 	)) {
@@ -120,7 +123,7 @@ async function discoverMatches(slack, memo, pr, channels) {
 	for (const ch of sample.slice(0, MAX_CHANNELS_PER_RUN)) {
 		for await (const res of slack.paginate(
 			"conversations.history",
-			{ channel: ch.id, oldest, limit: 200 },
+			{ channel: ch.id, oldest, limit: SLACK_PAGE_SIZE },
 			HISTORY_PAGES_PER_CHANNEL,
 		)) {
 			if (!res.ok) {
