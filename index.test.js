@@ -252,11 +252,15 @@ const slackFor = (scripts) => {
 	return { slack, calls };
 };
 
-const reactArgs = ({ slack, job = {}, botUserId = null }) => [
-	slack,
-	{ addEmoji: "eyes", removeEmoji: "", isRerun: false, ...job },
-	botUserId,
-];
+const reactArgs = ({ slack, job = {}, botUserId = null }) => {
+	const memo = new Memo();
+	if (botUserId) memo.set("botUserId", botUserId);
+	return [
+		slack,
+		memo,
+		{ addEmoji: "eyes", removeEmoji: "", isRerun: false, ...job },
+	];
+};
 
 // ---------------------------------------------------------------- slackCall
 
