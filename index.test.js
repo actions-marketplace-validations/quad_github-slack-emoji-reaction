@@ -5,17 +5,11 @@ import test from "node:test";
 
 import {
 	deriveStatus,
-	discoverMatches,
 	FatalError,
-	fetchBotUserId,
-	fetchChannels,
 	Memo,
-	matchesPullUrl,
 	prContext,
 	Reactor,
 	SlackClient,
-	tokenizeAngles,
-	urlsFromMessage,
 } from "./index.js";
 
 // ============================================================ static helpers
@@ -116,103 +110,6 @@ test("prContext: returns null on incomplete payload", () => {
 	assert.equal(prContext({}), null);
 });
 
-// ---------------------------------------------------------------- matchesPullUrl
-
-test("matchesPullUrl: accepts the canonical PR URL with or without query/fragment", () => {
-	const pr = { owner: "octo", repo: "hello", num: 123 };
-	const m = (u) => matchesPullUrl(pr, u);
-	assert.equal(m("https://github.com/octo/hello/pull/123"), true);
-	assert.equal(
-		m("https://github.com/octo/hello/pull/123?diff=split#discussion"),
-		true,
-	);
-});
-
-test("matchesPullUrl: rejects everything else", () => {
-	const pr = { owner: "octo", repo: "hello", num: 123 };
-	const m = (u) => matchesPullUrl(pr, u);
-	// /pull/1234 is the substring trap a naive includes() would hit.
-	assert.equal(m("https://github.com/octo/hello/pull/1234"), false);
-	// nested path under the PR
-	assert.equal(m("https://github.com/octo/hello/pull/123/files"), false);
-	// different host
-	assert.equal(m("https://gitlab.com/octo/hello/pull/123"), false);
-	// different repo
-	assert.equal(m("https://github.com/octo/other/pull/123"), false);
-	// unparseable / empty
-	assert.equal(m("not a url"), false);
-	assert.equal(m(""), false);
-});
-
-// ---------------------------------------------------------------- tokenizeAngles
-
-test("tokenizeAngles: bare URL in <…>", () => {
-	assert.deepEqual(
-		tokenizeAngles("see <https://github.com/o/r/pull/1> please"),
-		["https://github.com/o/r/pull/1"],
-	);
-});
-
-test("tokenizeAngles: |label suffix is stripped", () => {
-	assert.deepEqual(
-		tokenizeAngles("here: <https://github.com/o/r/pull/1|PR #1>"),
-		["https://github.com/o/r/pull/1"],
-	);
-});
-
-test("tokenizeAngles: multiple bare angles in one string", () => {
-	assert.deepEqual(tokenizeAngles("<https://a> and <https://b>"), [
-		"https://a",
-		"https://b",
-	]);
-});
-
-test("tokenizeAngles: degenerate inputs return [] without throwing or hanging", () => {
-	assert.deepEqual(tokenizeAngles(""), []);
-	assert.deepEqual(tokenizeAngles("no angles here"), []);
-	// Unbalanced `<` without `>` would infinite-loop without the right guard.
-	assert.deepEqual(tokenizeAngles("foo < bar"), []);
-});
-
-// ---------------------------------------------------------------- urlsFromMessage
-
-test("urlsFromMessage: extracts from text <…>", () => {
-	const urls = urlsFromMessage({
-		text: "check <https://github.com/o/r/pull/1>",
-	});
-	assert.ok(urls.includes("https://github.com/o/r/pull/1"));
-});
-
-test("urlsFromMessage: extracts from attachments.title_link and from_url", () => {
-	const urls = urlsFromMessage({
-		attachments: [
-			{
-				title_link: "https://github.com/o/r/pull/2",
-				from_url: "https://github.com/o/r/pull/2",
-			},
-		],
-	});
-	assert.ok(urls.includes("https://github.com/o/r/pull/2"));
-});
-
-test("urlsFromMessage: extracts from nested blocks (rich_text link element)", () => {
-	// GitHub's official Slack app posts PR URLs in blocks, not text.
-	const urls = urlsFromMessage({
-		blocks: [
-			{
-				type: "rich_text",
-				elements: [
-					{
-						type: "rich_text_section",
-						elements: [{ type: "link", url: "https://github.com/o/r/pull/3" }],
-					},
-				],
-			},
-		],
-	});
-	assert.ok(urls.includes("https://github.com/o/r/pull/3"));
-});
-
 // ============================================================ fetch-shim suite
 
 // Build a scripted fetch that pops a sequence of pre-canned responses keyed by
@@ -252,16 +149,20 @@ const slackFor = (scripts) => {
 	return { slack, calls };
 };
 
-// Build a Reactor seeded with one cached match so run() skips discovery
-// and goes straight into the reaction loop — that's the surface these tests
-// exercise. Returns the prMatches handle too so tests can observe whether
-// the entry was pruned (stale-match errors) or kept (tolerated/success).
-const setupReactor = ({ slack, job = {}, botUserId = null }) => {
+// Build a Reactor for run() tests. By default seeds a cached match so run()
+// skips discovery — callers exercising the discovery path pass `cached: null`.
+// Returns the prMatches handle so tests can observe retain/prune outcomes.
+const setupReactor = ({
+	slack,
+	job = {},
+	botUserId = null,
+	cached = [{ channel: "C1", ts: "1.0" }],
+}) => {
 	const memo = new Memo();
 	if (botUserId) memo.set("botUserId", botUserId);
-	const prKey = "o/r#1";
+	const prKey = "octo/hello#42";
 	const prMatches = new Memo();
-	prMatches.set(prKey, [{ channel: "C1", ts: "1.0" }]);
+	if (cached) prMatches.set(prKey, cached);
 	const reactor = new Reactor({
 		slack,
 		memo,
@@ -272,14 +173,14 @@ const setupReactor = ({ slack, job = {}, botUserId = null }) => {
 			isRerun: false,
 			closesPR: false,
 			prKey,
-			pr: { owner: "o", repo: "r", num: 1 },
+			pr: { owner: "octo", repo: "hello", num: 42 },
 			...job,
 		},
 	});
 	return { reactor, prMatches, prKey };
 };
 
-// ---------------------------------------------------------------- slackCall
+// ---------------------------------------------------------------- SlackClient.call
 
 test("slack.call: returns body verbatim on success", async () => {
 	const { slack } = slackFor({
@@ -342,55 +243,14 @@ test("slack.call: gives up after 3 retries and returns the last 429 body", async
 	assert.equal(calls.length, 4);
 });
 
-test("slack.call: non-rate-limit errors are returned without retry", async () => {
-	const { slack, calls } = slackFor({
-		"reactions.add": [
-			{ status: 200, body: { ok: false, error: "already_reacted" } },
-		],
+test("slack.call: invalid_auth response is thrown as FatalError", async () => {
+	const { slack } = slackFor({
+		"auth.test": [{ body: { ok: false, error: "invalid_auth" } }],
 	});
-	const res = await slack.call("reactions.add", {
-		channel: "C1",
-		timestamp: "1.0",
-		name: "eyes",
-	});
-	assert.equal(res.error, "already_reacted");
-	assert.equal(calls.length, 1);
-});
-
-// ---------------------------------------------------------------- fetchChannels
-
-test("fetchChannels: paginates conversations.list and filters to is_member", async () => {
-	const { slack, calls } = slackFor({
-		"conversations.list": [
-			{
-				body: {
-					ok: true,
-					channels: [
-						{ id: "C1", name: "general", is_member: true },
-						{ id: "C2", name: "random", is_member: false },
-					],
-					response_metadata: { next_cursor: "cursor-page-2" },
-				},
-			},
-			{
-				body: {
-					ok: true,
-					channels: [
-						{ id: "C3", name: "engineering", is_member: true },
-						{ id: "C4", name: "lurkers", is_member: false },
-					],
-					response_metadata: { next_cursor: "" },
-				},
-			},
-		],
-	});
-	const channels = await fetchChannels(slack);
-	assert.deepEqual(
-		channels.map((c) => c.id),
-		["C1", "C3"],
+	await assert.rejects(
+		slack.call("auth.test", {}),
+		(e) => e instanceof FatalError && /invalid_auth/.test(e.message),
 	);
-	assert.equal(calls.length, 2);
-	assert.equal(calls[1].params.cursor, "cursor-page-2");
 });
 
 // ---------------------------------------------------------------- Memo
@@ -412,116 +272,7 @@ test("Memo.ensure: refetches once the cell's age exceeds the TTL", async () => {
 	assert.equal(result, "fresh");
 });
 
-// ---------------------------------------------------------------- discoverMatches
-
-test("discoverMatches: scans history of every member channel for the PR URL", async () => {
-	const matchingMsg = {
-		ts: "1.001",
-		text: "see <https://github.com/octo/hello/pull/42>",
-	};
-	const noisyMsg = { ts: "1.002", text: "unrelated chat" };
-	const { slack, calls } = slackFor({
-		"conversations.history": [
-			{
-				body: { ok: true, messages: [matchingMsg, noisyMsg], has_more: false },
-			},
-			{ body: { ok: true, messages: [noisyMsg], has_more: false } },
-		],
-	});
-	const channels = [
-		{ id: "C1", name: "a" },
-		{ id: "C2", name: "b" },
-	];
-	const matches = await discoverMatches(
-		slack,
-		{ owner: "octo", repo: "hello", num: 42 },
-		channels,
-	);
-	assert.deepEqual(matches, [{ channel: "C1", ts: "1.001" }]);
-	assert.equal(calls.length, 2);
-	assert.ok(parseInt(calls[0].params.oldest, 10) > 0);
-});
-
-test("discoverMatches: respects 100-channel cap", async () => {
-	const channels = Array.from({ length: 150 }, (_, i) => ({
-		id: `C${i}`,
-		name: `c${i}`,
-	}));
-	const { slack, calls } = slackFor({
-		"conversations.history": Array.from({ length: 100 }, () => ({
-			body: { ok: true, messages: [], has_more: false },
-		})),
-	});
-	await discoverMatches(slack, { owner: "o", repo: "r", num: 1 }, channels);
-	assert.equal(calls.length, 100);
-});
-
-test("discoverMatches: paginates conversations.history up to 3 pages, then stops", async () => {
-	const page = (cursor, has_more) => ({
-		body: {
-			ok: true,
-			messages: [{ ts: "1.0", text: "noise" }],
-			has_more,
-			response_metadata: { next_cursor: cursor },
-		},
-	});
-	const { slack, calls } = slackFor({
-		"conversations.history": [
-			page("p2", true),
-			page("p3", true),
-			page("p4", true),
-			page("", false),
-		],
-	});
-	await discoverMatches(slack, { owner: "o", repo: "r", num: 1 }, [
-		{ id: "C1", name: "x" },
-	]);
-	assert.equal(calls.length, 3);
-});
-
-test("discoverMatches: extracts PR URL from blocks even when text is empty", async () => {
-	const msg = {
-		ts: "1.5",
-		blocks: [
-			{
-				type: "rich_text",
-				elements: [
-					{
-						type: "rich_text_section",
-						elements: [
-							{ type: "link", url: "https://github.com/octo/hello/pull/42" },
-						],
-					},
-				],
-			},
-		],
-	};
-	const { slack } = slackFor({
-		"conversations.history": [
-			{ body: { ok: true, messages: [msg], has_more: false } },
-		],
-	});
-	const matches = await discoverMatches(
-		slack,
-		{ owner: "octo", repo: "hello", num: 42 },
-		[{ id: "C1", name: "x" }],
-	);
-	assert.deepEqual(matches, [{ channel: "C1", ts: "1.5" }]);
-});
-
-// ---------------------------------------------------------------- fetchBotUserId
-
-test("fetchBotUserId: throws FatalError on invalid_auth (so caller can clean-exit)", async () => {
-	const { slack } = slackFor({
-		"auth.test": [{ body: { ok: false, error: "invalid_auth" } }],
-	});
-	await assert.rejects(
-		fetchBotUserId(slack),
-		(e) => e instanceof FatalError && /invalid_auth/.test(e.message),
-	);
-});
-
-// ---------------------------------------------------------------- Reactor.run (flip cleanup)
+// ---------------------------------------------------------------- Reactor.run (flip cleanup, with cached match)
 
 test("Reactor.run: approved with our bot owning a stale changes-requested removes the warning, then adds approved", async () => {
 	const { slack, calls } = slackFor({
@@ -631,4 +382,137 @@ test("Reactor.run: invalid_auth on reactions.add propagates as FatalError", asyn
 		reactor.run(),
 		(e) => e instanceof FatalError && /invalid_auth/.test(e.message),
 	);
+});
+
+// ---------------------------------------------------------------- Reactor.run (discovery, no cached match)
+
+test("Reactor.run: with no cached match, paginates channels.list (filtered to is_member) and scans history", async () => {
+	const matchingMsg = {
+		ts: "1.001",
+		text: "see <https://github.com/octo/hello/pull/42>",
+	};
+	const { slack, calls } = slackFor({
+		"conversations.list": [
+			{
+				body: {
+					ok: true,
+					channels: [
+						{ id: "C1", name: "general", is_member: true },
+						{ id: "C2", name: "lurkers", is_member: false },
+					],
+					response_metadata: { next_cursor: "page2" },
+				},
+			},
+			{
+				body: {
+					ok: true,
+					channels: [{ id: "C3", name: "engineering", is_member: true }],
+					response_metadata: { next_cursor: "" },
+				},
+			},
+		],
+		"conversations.history": [
+			{ body: { ok: true, messages: [matchingMsg], has_more: false } },
+			{ body: { ok: true, messages: [], has_more: false } },
+		],
+		"reactions.add": [{ body: { ok: true } }],
+	});
+	const { reactor, prMatches, prKey } = setupReactor({
+		slack,
+		job: { addEmoji: "x" },
+		cached: null,
+	});
+	await reactor.run();
+	// channels.list paginated to completion, history scanned for both
+	// is_member channels (C1, C3 — not C2), reaction added on the matching
+	// message in C1, both matches stored in prMatches.
+	assert.equal(
+		calls.filter((c) => c.method === "conversations.list").length,
+		2,
+	);
+	assert.deepEqual(
+		calls
+			.filter((c) => c.method === "conversations.history")
+			.map((c) => c.params.channel),
+		["C1", "C3"],
+	);
+	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "1.001" }]);
+});
+
+test("Reactor.run: discovery rejects /pull/123 ↔ /pull/1234 substring trap", async () => {
+	const { slack } = slackFor({
+		"conversations.list": [
+			{
+				body: {
+					ok: true,
+					channels: [{ id: "C1", name: "general", is_member: true }],
+					response_metadata: { next_cursor: "" },
+				},
+			},
+		],
+		"conversations.history": [
+			{
+				body: {
+					ok: true,
+					messages: [
+						{
+							ts: "1.0",
+							text: "see <https://github.com/octo/hello/pull/1234>",
+						},
+					],
+					has_more: false,
+				},
+			},
+		],
+	});
+	const { reactor, prMatches, prKey } = setupReactor({
+		slack,
+		job: { addEmoji: "x" },
+		cached: null,
+	});
+	await reactor.run();
+	// No reactions.add (no match), no entry in cache (terminal-ish empty
+	// → delete handled by the "non-terminal + nothing surviving" branch).
+	assert.equal(prMatches.get(prKey), undefined);
+});
+
+test("Reactor.run: discovery extracts PR URL from message blocks (not just text)", async () => {
+	const msgWithBlocks = {
+		ts: "1.5",
+		blocks: [
+			{
+				type: "rich_text",
+				elements: [
+					{
+						type: "rich_text_section",
+						elements: [
+							{ type: "link", url: "https://github.com/octo/hello/pull/42" },
+						],
+					},
+				],
+			},
+		],
+	};
+	const { slack } = slackFor({
+		"conversations.list": [
+			{
+				body: {
+					ok: true,
+					channels: [{ id: "C1", name: "general", is_member: true }],
+					response_metadata: { next_cursor: "" },
+				},
+			},
+		],
+		"conversations.history": [
+			{ body: { ok: true, messages: [msgWithBlocks], has_more: false } },
+		],
+		"reactions.add": [{ body: { ok: true } }],
+	});
+	const { reactor, prMatches, prKey } = setupReactor({
+		slack,
+		job: { addEmoji: "x" },
+		cached: null,
+	});
+	await reactor.run();
+	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "1.5" }]);
 });

@@ -36,7 +36,7 @@ const nowS = () => Math.floor(Date.now() / 1000);
 const input = (name) =>
 	(process.env[`INPUT_${name.toUpperCase()}`] || "").trim();
 
-export function tokenizeAngles(text) {
+function tokenizeAngles(text) {
 	const out = [];
 	let i = 0;
 	while (i < text.length) {
@@ -59,7 +59,7 @@ function walkForUrls(node) {
 	return here.concat(...Object.values(node).map(walkForUrls));
 }
 
-export function urlsFromMessage(message) {
+function urlsFromMessage(message) {
 	const fromText =
 		typeof message.text === "string" ? tokenizeAngles(message.text) : [];
 	const fromAttachments = (message.attachments || []).flatMap((a) =>
@@ -77,7 +77,7 @@ const PR_URL = new URLPattern({
 	pathname: "/:owner/:repo/pull/:num",
 });
 
-export function matchesPullUrl(pr, candidate) {
+function matchesPullUrl(pr, candidate) {
 	const g = PR_URL.exec(candidate)?.pathname.groups;
 	return (
 		!!g &&
@@ -417,13 +417,13 @@ export class Memo {
 	}
 }
 
-export async function fetchBotUserId(slack) {
+async function fetchBotUserId(slack) {
 	const res = await slack.call("auth.test", {});
 	if (!res.ok) throw new Error(`auth.test failed: ${res.error}`);
 	return res.user_id;
 }
 
-export async function fetchChannels(slack) {
+async function fetchChannels(slack) {
 	const out = [];
 	for await (const res of slack.paginate("conversations.list", {
 		types: "public_channel,private_channel",
@@ -438,7 +438,7 @@ export async function fetchChannels(slack) {
 	return out;
 }
 
-export async function discoverMatches(slack, pr, channels) {
+async function discoverMatches(slack, pr, channels) {
 	if (channels.length > MAX_CHANNELS_PER_RUN) {
 		console.warn(
 			`channels-per-run cap (${MAX_CHANNELS_PER_RUN}) reached; skipped ${channels.length - MAX_CHANNELS_PER_RUN} remaining`,

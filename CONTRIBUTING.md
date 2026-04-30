@@ -34,8 +34,8 @@ commit. See `fixtures/SOURCE.md` for the pin and refresh recipe.
 `index.js` is a single file, organized:
 
 - **Constants** — Slack endpoint, status names, error sets, caps and TTLs.
-- **URL + event helpers** — `tokenizeAngles`, `urlsFromMessage`,
-  `matchesPullUrl` (URLPattern-based), `deriveStatus`, `prContext`.
+- **Pure helpers** — `deriveStatus`, `prContext` and module-private URL
+  helpers (`tokenizeAngles`, `urlsFromMessage`, `matchesPullUrl` etc.).
 - **`FatalError`** — operator-fixable errors thrown with pre-built
   messages; caught at the top level. `FatalError.notNull(v, msg)` for
   required-input checks.
@@ -44,11 +44,12 @@ commit. See `fixtures/SOURCE.md` for the pin and refresh recipe.
   an async-iterable cursor walker.
 - **`CacheClient`** — restore/save against the GHA Cache v1 API.
 - **`Memo`** — keyed `{value, refreshedAt}` cells with TTL-aware
-  `ensure`, `evictOlderThan`, `evictOldestPast`. Used for both memoized I/O and
-  the per-PR match map.
-- **Slack ops** — `fetchBotUserId`, `fetchChannels`, `discoverMatches`.
+  `ensure`, `evictOlderThan`, `evictOldestPast`. Used for both memoized
+  I/O and the per-PR match map.
+- **`Reactor`** — the per-run pipeline: bundles the four deps once and
+  exposes `run()`. Discovery + reaction are private.
 - **`readJob`** + **`main`** — read env/payload into a job spec, then
-  drive sweep → discover → react → save.
+  drive sweep → reactor → save.
 
 The action runs on `node24` in production. Pure-JS, no runtime deps.
 
