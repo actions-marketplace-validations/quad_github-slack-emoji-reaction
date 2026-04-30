@@ -16,7 +16,7 @@ class RateLimitError extends Error {
 // catch synthesises a Slack-shaped body on exhaustion.
 class NetworkError extends Error {
 	constructor(cause) {
-		super("", { cause });
+		super(undefined, { cause });
 	}
 }
 
