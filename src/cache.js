@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: MIT
+import { createHash } from "node:crypto";
 import * as log from "./log.js";
 
 // Restore/save state against the GHA Cache v2 API. ACTIONS_RESULTS_URL + ACTIONS_RUNTIME_TOKEN are auto-injected into every workflow job.
 export class CacheClient {
-	// Namespaced so this action's entries don't collide with anything else in the per-repo GHA cache.
-	// Bump SCHEMA when the serialized cache shape changes; entries with a different version are invisible to restores.
-	static #BASE = "quad-github-slack-emoji-reaction";
-	static #SCHEMA = "v1";
-	static #VERSION = `${CacheClient.#BASE}-${CacheClient.#SCHEMA}`;
-	static #KEY_PREFIX = `${CacheClient.#VERSION}-state-`;
+	// Namespaced so this action's entries don't collide with anything else in the per-repo GHA cache; bump the trailing version when the serialized cache shape changes.
+	static #NAMESPACE = "quad-github-slack-emoji-reaction-v1";
+	static #KEY_PREFIX = `${CacheClient.#NAMESPACE}-state-`;
+	// Server requires a 64-char hex SHA-256; any deterministic input works.
+	static #VERSION = createHash("sha256")
+		.update(CacheClient.#NAMESPACE)
+		.digest("hex");
 	static #SERVICE = "twirp/github.actions.results.api.v1.CacheService/";
 
 	#base;
