@@ -252,11 +252,11 @@ const slackFor = (scripts) => {
 	return { slack, calls };
 };
 
-const ctx = ({ slack, job = {}, botUserId = null }) => ({
+const reactArgs = ({ slack, job = {}, botUserId = null }) => [
 	slack,
-	job: { addEmoji: "eyes", removeEmoji: "", isRerun: false, ...job },
+	{ addEmoji: "eyes", removeEmoji: "", isRerun: false, ...job },
 	botUserId,
-});
+];
 
 // ---------------------------------------------------------------- slackCall
 
@@ -520,7 +520,7 @@ test("reactToMatch: approved with our bot owning a stale changes-requested remov
 		"reactions.add": [{ body: { ok: true } }],
 	});
 	const result = await reactToMatch(
-		ctx({
+		...reactArgs({
 			slack,
 			job: { addEmoji: "white_check_mark", removeEmoji: "warning" },
 			botUserId: "U0BOT",
@@ -549,7 +549,7 @@ test("reactToMatch: approved without our bot in the warning users array does NOT
 		"reactions.add": [{ body: { ok: true } }],
 	});
 	await reactToMatch(
-		ctx({
+		...reactArgs({
 			slack,
 			job: { addEmoji: "white_check_mark", removeEmoji: "warning" },
 			botUserId: "U0BOT",
@@ -568,7 +568,7 @@ test("reactToMatch: when isRerun=true, skips the entire flip-cleanup branch (re-
 		"reactions.add": [{ body: { ok: true } }],
 	});
 	await reactToMatch(
-		ctx({
+		...reactArgs({
 			slack,
 			job: {
 				addEmoji: "white_check_mark",
@@ -592,7 +592,7 @@ test("reactToMatch: tolerated reaction errors (already_reacted) do not throw", a
 	});
 	// No removeEmoji passed so flip cleanup is skipped.
 	const result = await reactToMatch(
-		ctx({ slack, job: { addEmoji: "large_purple_square" } }),
+		...reactArgs({ slack, job: { addEmoji: "large_purple_square" } }),
 		{ channel: "C1", ts: "1.0" },
 	);
 	assert.equal(result.error, "already_reacted");
@@ -603,7 +603,7 @@ test("reactToMatch: stale-match errors (channel_not_found) surface so caller can
 		"reactions.add": [{ body: { ok: false, error: "channel_not_found" } }],
 	});
 	const result = await reactToMatch(
-		ctx({ slack, job: { addEmoji: "large_purple_square" } }),
+		...reactArgs({ slack, job: { addEmoji: "large_purple_square" } }),
 		{ channel: "C1", ts: "1.0" },
 	);
 	assert.equal(result.error, "channel_not_found");
@@ -614,7 +614,7 @@ test("reactToMatch: invalid_auth on reactions.add propagates as AuthError", asyn
 		"reactions.add": [{ body: { ok: false, error: "invalid_auth" } }],
 	});
 	await assert.rejects(
-		reactToMatch(ctx({ slack }), { channel: "C1", ts: "1.0" }),
+		reactToMatch(...reactArgs({ slack }), { channel: "C1", ts: "1.0" }),
 		(e) => e instanceof AuthError && e.code === "invalid_auth",
 	);
 });

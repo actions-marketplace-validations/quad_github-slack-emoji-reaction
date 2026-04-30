@@ -173,7 +173,7 @@ export class SlackClient {
 	//   { kind: "ratelimited", waitMs, body }      — sleep waitMs, retry
 	//   { kind: "network", waitMs, body }          — sleep waitMs, retry
 	// `body` carries what we'd surface if retries are exhausted.
-	async #once(method, params) {
+	async #callOnce(method, params) {
 		let res;
 		try {
 			res = await this.#fetch(this.#apiBase + method, {
@@ -214,7 +214,7 @@ export class SlackClient {
 		let outcome;
 		for (let attempt = 0; attempt <= this.#maxRetries; attempt++) {
 			await this.#pace();
-			outcome = await this.#once(method, params);
+			outcome = await this.#callOnce(method, params);
 			if (outcome.kind === "ok") return outcome.body;
 			const tag = `slack ${method} ${outcome.kind}`;
 			const where = `(attempt ${attempt + 1}/${this.#maxRetries + 1})`;
@@ -485,7 +485,7 @@ function warnIfUntolerated(prefix, res) {
 	}
 }
 
-async function flipCleanup({ slack, job, botUserId }, match) {
+async function flipCleanup(slack, job, botUserId, match) {
 	if (job.isRerun || !job.removeEmoji) return;
 
 	const where = `${match.channel}/${match.ts}`;
@@ -509,15 +509,15 @@ async function flipCleanup({ slack, job, botUserId }, match) {
 	warnIfUntolerated(`reactions.remove ${where} ${job.removeEmoji}`, rm);
 }
 
-export async function reactToMatch(ctx, match) {
+export async function reactToMatch(slack, job, botUserId, match) {
 	const where = `${match.channel}/${match.ts}`;
-	await flipCleanup(ctx, match);
-	const add = await ctx.slack.call("reactions.add", {
+	await flipCleanup(slack, job, botUserId, match);
+	const add = await slack.call("reactions.add", {
 		channel: match.channel,
 		timestamp: match.ts,
-		name: ctx.job.addEmoji,
+		name: job.addEmoji,
 	});
-	warnIfUntolerated(`reactions.add ${where} ${ctx.job.addEmoji}`, add);
+	warnIfUntolerated(`reactions.add ${where} ${job.addEmoji}`, add);
 	return { ok: !!add.ok, error: add.error };
 }
 
@@ -577,18 +577,7 @@ async function findMatches(slack, memo, prMatches, job) {
 // React to as many matches as the per-run cap allows, keeping prMatches
 // in sync per iteration so a mid-loop throw doesn't lose discovered work
 // or leave a terminal PR's entry stranded.
-async function applyReactions(slack, memo, prMatches, job, matches) {
-	const needsFlipCleanup = job.removeEmoji && !job.isRerun && matches.length;
-	const ctx = {
-		slack,
-		job,
-		botUserId: needsFlipCleanup
-			? await memo.ensure("botUserId", BOT_USER_ID_TTL_S, () =>
-					fetchBotUserId(slack),
-				)
-			: null,
-	};
-
+async function applyReactions(slack, prMatches, job, matches, botUserId) {
 	const toReact = matches.slice(0, REACTIONS_PER_RUN_CAP);
 	if (matches.length > REACTIONS_PER_RUN_CAP) {
 		console.warn(
@@ -598,20 +587,20 @@ async function applyReactions(slack, memo, prMatches, job, matches) {
 
 	// Persist the full set up-front so an early throw still leaves the
 	// discovered matches in cache for the next run to retry.
-	let alive = [...matches];
-	prMatches.set(job.prKey, alive);
+	let surviving = [...matches];
+	prMatches.set(job.prKey, surviving);
 
 	for (const m of toReact) {
-		const result = await reactToMatch(ctx, m);
+		const result = await reactToMatch(slack, job, botUserId, m);
 		if (STALE_MATCH_ERRORS.has(result.error)) {
-			alive = alive.filter((x) => x !== m);
-			prMatches.set(job.prKey, alive);
+			surviving = surviving.filter((x) => x !== m);
+			prMatches.set(job.prKey, surviving);
 		}
 	}
 
 	// Clean completion: terminal events drop the entry entirely; non-terminal
-	// runs that left nothing alive also drop (next event re-discovers).
-	if (job.isTerminal || !alive.length) prMatches.delete(job.prKey);
+	// runs that left nothing surviving also drop (next event re-discovers).
+	if (job.isTerminal || !surviving.length) prMatches.delete(job.prKey);
 }
 
 async function main() {
@@ -632,7 +621,13 @@ async function main() {
 	try {
 		prMatches.sweepStale(nowS() - PR_STALE_TTL_S);
 		const matches = await findMatches(slack, memo, prMatches, job);
-		await applyReactions(slack, memo, prMatches, job, matches);
+		const botUserId =
+			job.removeEmoji && !job.isRerun && matches.length
+				? await memo.ensure("botUserId", BOT_USER_ID_TTL_S, () =>
+						fetchBotUserId(slack),
+					)
+				: null;
+		await applyReactions(slack, prMatches, job, matches, botUserId);
 	} finally {
 		const evicted = prMatches.capByLru(MAX_PR_ENTRIES);
 		if (evicted) console.warn(`pr-entries safety cap; evicted ${evicted}`);
