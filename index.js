@@ -128,7 +128,7 @@ export function prContext(payload) {
 // operator-facing message but no stack trace. The entrypoint catches
 // and prints the message; everything else propagates to Node's default
 // unhandled-rejection handler (stack + non-zero exit).
-export class FatalError extends Error {}
+class FatalError extends Error {}
 
 export class AuthError extends FatalError {
 	constructor(code) {
