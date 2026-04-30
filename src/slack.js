@@ -107,9 +107,10 @@ export class SlackClient {
 	async *paginate(method, baseParams, maxPages) {
 		let cursor = "";
 		for (let page = 0; page < maxPages; page++) {
-			const params = { ...baseParams };
-			if (cursor) params.cursor = cursor;
-			const res = await this.call(method, params);
+			const res = await this.call(method, {
+				...baseParams,
+				...(cursor && { cursor }),
+			});
 			yield res;
 			if (!res.ok) return;
 			cursor = res.response_metadata?.next_cursor || "";
