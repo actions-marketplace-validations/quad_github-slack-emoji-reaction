@@ -62,7 +62,7 @@ jobs:
   react:
     runs-on: ubuntu-latest
     steps:
-      - uses: substrate/github-slack-emoji-reaction@v1
+      - uses: quad/github-slack-emoji-reaction@v1
         with:
           slack-token: ${{ secrets.SLACK_TOKEN }}
           emoji-approved:           white_check_mark

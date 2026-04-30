@@ -5,7 +5,7 @@ import * as log from "./log.js";
 export class CacheClient {
 	// Namespaced so this action's entries don't collide with anything else
 	// in the per-repo GHA cache.
-	static #BASE = "substrate-github-slack-emoji-reaction";
+	static #BASE = "quad-github-slack-emoji-reaction";
 	static #KEY_PREFIX = `${CacheClient.#BASE}-state-`;
 	static #VERSION = `${CacheClient.#BASE}-v1`;
 
