@@ -5,7 +5,7 @@ const nowS = () => Math.floor(Date.now() / 1000);
 export class Memo {
 	#cells;
 
-	constructor(cells = {}) {
+	constructor(cells) {
 		this.#cells = cells;
 	}
 

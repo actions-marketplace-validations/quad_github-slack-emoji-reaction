@@ -79,11 +79,15 @@ async function fetchBotUserId(slack) {
 
 async function fetchChannels(slack) {
 	const out = [];
-	for await (const res of slack.paginate("conversations.list", {
-		types: "public_channel,private_channel",
-		exclude_archived: true,
-		limit: 200,
-	})) {
+	for await (const res of slack.paginate(
+		"conversations.list",
+		{
+			types: "public_channel,private_channel",
+			exclude_archived: true,
+			limit: 200,
+		},
+		Infinity,
+	)) {
 		if (!res.ok) throw new Error(`conversations.list failed: ${res.error}`);
 		for (const c of res.channels) {
 			if (c.is_member) out.push({ id: c.id, name: c.name });
@@ -104,7 +108,7 @@ async function discoverMatches(slack, pr, channels) {
 		for await (const res of slack.paginate(
 			"conversations.history",
 			{ channel: ch.id, oldest, limit: 200 },
-			{ maxPages: HISTORY_PAGES_PER_CHANNEL },
+			HISTORY_PAGES_PER_CHANNEL,
 		)) {
 			if (!res.ok) {
 				console.warn(
@@ -295,16 +299,17 @@ async function main() {
 	if (!job) return;
 	console.log(`::add-mask::${job.token}`);
 
-	// Run-level deadline. Defense-in-depth against a stuck workflow: if any
-	// path through the reactor blocks past the deadline, the signal aborts
-	// in-flight fetches + sleeps and the throw lands in our finally block,
-	// which still saves whatever progress made it into memo/prMatches.
+	// finally still saves whatever progress made it before any abort.
 	const deadline = AbortSignal.timeout(RUN_DEADLINE_MS);
-	const slack = new SlackClient({ token: job.token, signal: deadline });
+	const slack = new SlackClient({
+		token: job.token,
+		fetch: globalThis.fetch,
+		signal: deadline,
+	});
 	const cache = new CacheClient();
-	const restored = (await cache.restore()) ?? {};
-	const memo = new Memo(restored.memo);
-	const prMatches = new Memo(restored.prMatches);
+	const restored = (await cache.restore(deadline)) ?? {};
+	const memo = new Memo(restored.memo ?? {});
+	const prMatches = new Memo(restored.prMatches ?? {});
 
 	prMatches.evictOlderThan(PR_STALE_TTL_S);
 	const reactor = new Reactor({ slack, memo, prMatches, job });

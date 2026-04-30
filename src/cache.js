@@ -1,32 +1,25 @@
 // Restore/save state against the GHA Cache v1 API. ACTIONS_CACHE_URL +
 // ACTIONS_RUNTIME_TOKEN are auto-injected into every workflow job.
 export class CacheClient {
+	static #KEY_PREFIX = "slack-emoji-reactions-state-";
+	static #VERSION = "slack-emoji-reactions-v1";
+
 	#base;
 	#token;
-	#fetch;
 	#headers;
 	#enabled;
-	#keyPrefix;
-	#version;
 	#runKey;
 
-	constructor({
-		env = process.env,
-		fetch = globalThis.fetch,
-		keyPrefix = "slack-emoji-reactions-state-",
-		version = "slack-emoji-reactions-v1",
-	} = {}) {
+	constructor() {
+		const env = process.env;
 		const rawBase = env.ACTIONS_CACHE_URL || "";
 		this.#base = rawBase.endsWith("/") ? rawBase : rawBase ? `${rawBase}/` : "";
 		this.#token = env.ACTIONS_RUNTIME_TOKEN || "";
-		this.#fetch = fetch;
 		this.#headers = {
 			Authorization: `Bearer ${this.#token}`,
 			Accept: "application/json;api-version=6.0-preview.1",
 		};
 		this.#enabled = !!this.#base && !!this.#token;
-		this.#keyPrefix = keyPrefix;
-		this.#version = version;
 		this.#runKey = `${env.GITHUB_RUN_ID || "norunid"}-${env.GITHUB_RUN_ATTEMPT || "1"}`;
 	}
 
@@ -34,14 +27,14 @@ export class CacheClient {
 		return new URL(`_apis/artifactcache/${path}`, this.#base);
 	}
 
-	#send(path, init = {}) {
-		return this.#fetch(this.#url(path), {
+	#send(path, init) {
+		return fetch(this.#url(path), {
 			...init,
 			headers: { ...this.#headers, ...(init.headers || {}) },
 		});
 	}
 
-	async restore() {
+	async restore(signal) {
 		if (!this.#enabled) return null;
 		try {
 			const lookup = this.#url("cache");
@@ -49,10 +42,10 @@ export class CacheClient {
 			// against every entry we've saved, returning the most recent one.
 			lookup.searchParams.set(
 				"keys",
-				`${this.#keyPrefix}__sentinel__,${this.#keyPrefix}`,
+				`${CacheClient.#KEY_PREFIX}__sentinel__,${CacheClient.#KEY_PREFIX}`,
 			);
-			lookup.searchParams.set("version", this.#version);
-			const res = await this.#fetch(lookup, { headers: this.#headers });
+			lookup.searchParams.set("version", CacheClient.#VERSION);
+			const res = await fetch(lookup, { headers: this.#headers, signal });
 			if (res.status === 204) return null;
 			if (!res.ok) {
 				console.warn(`cache restore lookup status ${res.status}`);
@@ -60,7 +53,7 @@ export class CacheClient {
 			}
 			const meta = await res.json();
 			if (!meta?.archiveLocation) return null;
-			const blob = await this.#fetch(meta.archiveLocation);
+			const blob = await fetch(meta.archiveLocation, { signal });
 			if (!blob.ok) {
 				console.warn(`cache blob fetch status ${blob.status}`);
 				return null;
@@ -72,6 +65,7 @@ export class CacheClient {
 		}
 	}
 
+	// No signal: save runs in finally to persist progress past any abort.
 	async save(state) {
 		if (!this.#enabled) return;
 		try {
@@ -81,8 +75,8 @@ export class CacheClient {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({
-					key: `${this.#keyPrefix}${this.#runKey}`,
-					version: this.#version,
+					key: `${CacheClient.#KEY_PREFIX}${this.#runKey}`,
+					version: CacheClient.#VERSION,
 					cacheSize: body.length,
 				}),
 			});

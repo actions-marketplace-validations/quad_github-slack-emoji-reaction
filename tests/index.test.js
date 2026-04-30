@@ -154,10 +154,10 @@ const setupReactor = ({
 	botUserId = null,
 	cached = [{ channel: "C1", ts: "1.0" }],
 }) => {
-	const memo = new Memo();
+	const memo = new Memo({});
 	if (botUserId) memo.set("botUserId", botUserId);
 	const prKey = "octo/hello#42";
-	const prMatches = new Memo();
+	const prMatches = new Memo({});
 	if (cached) prMatches.set(prKey, cached);
 	const reactor = new Reactor({
 		slack,
@@ -252,7 +252,7 @@ test("slack.call: invalid_auth response is thrown as FatalError", async () => {
 // ---------------------------------------------------------------- Memo
 
 test("Memo.ensure: caches first call, skips fetcher on subsequent calls within TTL", async () => {
-	const memo = new Memo();
+	const memo = new Memo({});
 	let calls = 0;
 	const fetcher = async () => ++calls;
 	assert.equal(await memo.ensure("k", 60, fetcher), 1);

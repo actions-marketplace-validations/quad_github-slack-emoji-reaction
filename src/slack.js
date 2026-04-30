@@ -1,6 +1,5 @@
 import { FatalError } from "./errors.js";
 
-// AbortSignal-aware sleep. Rejects with the signal's reason on abort.
 const sleep = (ms, signal) =>
 	new Promise((resolve, reject) => {
 		if (signal?.aborted) return reject(signal.reason);
@@ -17,6 +16,8 @@ const sleep = (ms, signal) =>
 
 export class SlackClient {
 	static #SLACK_API = "https://slack.com/api/";
+	static #MAX_RETRIES = 2;
+	static #RETRY_AFTER_CAP_S = 60;
 	static #AUTH_ERRORS = new Set([
 		"invalid_auth",
 		"token_revoked",
@@ -26,36 +27,20 @@ export class SlackClient {
 
 	#token;
 	#fetch;
-	#apiBase;
-	#maxRetries;
-	#retryAfterCapS;
 	#signal;
 
-	constructor({
-		token,
-		fetch = globalThis.fetch,
-		apiBase = SlackClient.#SLACK_API,
-		maxRetries = 2,
-		retryAfterCapS = 60,
-		signal,
-	} = {}) {
+	constructor({ token, fetch, signal }) {
 		this.#token = token;
 		this.#fetch = fetch;
-		this.#apiBase = apiBase;
-		this.#maxRetries = maxRetries;
-		this.#retryAfterCapS = retryAfterCapS;
 		this.#signal = signal;
 	}
 
-	// Outcome:
-	//   { kind: "ok", body }                       — return body
-	//   { kind: "ratelimited", waitMs, body }      — sleep waitMs, retry
-	//   { kind: "network", waitMs, body }          — sleep waitMs, retry
-	// `body` carries what we'd surface if retries are exhausted.
+	// Tagged outcome for call() to consume; `body` is what's returned on
+	// retry exhaustion.
 	async #callOnce(method, params) {
 		let res;
 		try {
-			res = await this.#fetch(this.#apiBase + method, {
+			res = await this.#fetch(SlackClient.#SLACK_API + method, {
 				method: "POST",
 				headers: {
 					Authorization: `Bearer ${this.#token}`,
@@ -81,7 +66,7 @@ export class SlackClient {
 		if (rateLimited) {
 			const secs = Math.min(
 				Number(res.headers.get("retry-after")) || 1,
-				this.#retryAfterCapS,
+				SlackClient.#RETRY_AFTER_CAP_S,
 			);
 			return { kind: "ratelimited", waitMs: secs * 1000, body };
 		}
@@ -95,27 +80,24 @@ export class SlackClient {
 
 	async call(method, params) {
 		let outcome;
-		for (let attempt = 0; attempt <= this.#maxRetries; attempt++) {
+		for (let attempt = 0; attempt <= SlackClient.#MAX_RETRIES; attempt++) {
 			this.#signal?.throwIfAborted();
 			outcome = await this.#callOnce(method, params);
 			if (outcome.kind === "ok") return outcome.body;
 			const tag = `slack ${method} ${outcome.kind}`;
-			const where = `(attempt ${attempt + 1}/${this.#maxRetries + 1})`;
+			const where = `(attempt ${attempt + 1}/${SlackClient.#MAX_RETRIES + 1})`;
 			console.warn(
 				outcome.kind === "network"
 					? `${tag}: ${outcome.body.message} ${where}`
 					: `${tag}; retry-after ${outcome.waitMs / 1000}s ${where}`,
 			);
-			if (attempt >= this.#maxRetries) break;
+			if (attempt >= SlackClient.#MAX_RETRIES) break;
 			await sleep(outcome.waitMs, this.#signal);
 		}
 		return outcome.body;
 	}
 
-	// Yields successive Slack pages, threading cursor through. Caps at
-	// `maxPages` if given; otherwise drains to completion. Stops on
-	// non-ok response or empty next_cursor.
-	async *paginate(method, baseParams, { maxPages = Infinity } = {}) {
+	async *paginate(method, baseParams, maxPages) {
 		let cursor = "";
 		for (let page = 0; page < maxPages; page++) {
 			const params = { ...baseParams };
