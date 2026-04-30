@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // AbortSignal-aware sleep until a wall-clock deadline (Date.now() ms).
 // Idempotent under retries: passing the same deadline through and re-
 // entering doesn't extend the total wait.

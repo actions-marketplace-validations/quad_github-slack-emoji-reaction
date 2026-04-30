@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import * as log from "./log.js";
 
 // Restore/save state against the GHA Cache v1 API. ACTIONS_CACHE_URL +

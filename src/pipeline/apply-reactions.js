@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 const BOT_USER_ID_TTL_S = 30 * 24 * 3600;
 const REACTIONS_PER_RUN_CAP = 50;
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { retry } from "./async.js";
 import { FatalError } from "./errors.js";
 import * as log from "./log.js";

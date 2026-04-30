@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 const nowS = () => Math.floor(Date.now() / 1000);
 
 export class Memo {

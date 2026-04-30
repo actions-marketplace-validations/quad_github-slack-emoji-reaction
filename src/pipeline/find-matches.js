@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import * as log from "../log.js";
 
 const CHANNEL_LIST_TTL_S = 24 * 3600;

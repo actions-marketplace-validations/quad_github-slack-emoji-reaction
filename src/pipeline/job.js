@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import fs from "node:fs";
 
 import { FatalError } from "../errors.js";

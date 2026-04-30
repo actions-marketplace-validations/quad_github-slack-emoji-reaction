@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Operator-fixable failures: top-level catch prints the message and exits 1
 // without a stack. Anything else propagates as an unhandled rejection.
 export class FatalError extends Error {
