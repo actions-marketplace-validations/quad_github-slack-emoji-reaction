@@ -3,14 +3,17 @@
 Reacts on Slack messages linking to a pull request with emoji that mirror the
 PR's state — `approved` → ✅, `merged` → 🟪, etc.
 
-| Event you trigger on                              | Reacts with             |
-| ------------------------------------------------- | ----------------------- |
-| `pull_request_review.submitted` approved          | `emoji-approved`        |
+| Event you trigger on                              | Reacts with               |
+| ------------------------------------------------- | ------------------------- |
+| `pull_request_review.submitted` approved          | `emoji-approved`          |
 | `pull_request_review.submitted` changes_requested | `emoji-changes-requested` |
-| `pull_request.closed` (merged)                    | `emoji-merged`          |
-| `pull_request.closed` (not merged)                | `emoji-closed`          |
+| `pull_request_review.submitted` commented         | `emoji-commented`         |
+| `pull_request.closed` (merged)                    | `emoji-merged`            |
+| `pull_request.closed` (not merged)                | `emoji-closed`            |
 
-Comment-only reviews and review dismissals are ignored.
+Review dismissals are ignored. Each `emoji-*` input is optional, so noisy
+states (e.g. CI bots filing constant comment-only reviews) can be silenced
+by leaving the corresponding input unset.
 
 ## Install
 
@@ -64,6 +67,7 @@ jobs:
           slack-token: ${{ secrets.SLACK_TOKEN }}
           emoji-approved:           white_check_mark
           emoji-changes-requested:  warning
+          emoji-commented:          speech_balloon
           emoji-merged:             large_purple_square
           emoji-closed:             x
 ```

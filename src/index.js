@@ -7,6 +7,7 @@ import { SlackClient } from "./slack.js";
 
 const STATUS_APPROVED = "approved";
 const STATUS_CHANGES_REQUESTED = "changes-requested";
+const STATUS_COMMENTED = "commented";
 const STATUS_MERGED = "merged";
 const STATUS_CLOSED = "closed";
 
@@ -39,6 +40,11 @@ export function deriveStatus(eventName, payload) {
 		const state = payload.review?.state;
 		if (state === "approved") return STATUS_APPROVED;
 		if (state === "changes_requested") return STATUS_CHANGES_REQUESTED;
+		if (state === "commented") {
+			// Bot-filed reviews (Dependabot, Renovate, etc.) are constant noise.
+			if (payload.review?.user?.type === "Bot") return null;
+			return STATUS_COMMENTED;
+		}
 		return null;
 	}
 	if (eventName === "pull_request") {

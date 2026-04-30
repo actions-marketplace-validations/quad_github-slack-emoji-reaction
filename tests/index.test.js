@@ -66,15 +66,19 @@ test("deriveStatus: pull_request closed merged=false → closed", () => {
 	);
 });
 
-test("deriveStatus: returns null for non-mapped events", () => {
-	// commented reviews, dismissed reviews, opened PRs, and unrelated events.
+test("deriveStatus: pull_request_review submitted commented → commented", () => {
+	// Upstream submitted.payload.json has review.state: commented verbatim.
 	assert.equal(
 		deriveStatus(
 			"pull_request_review",
 			upstream("pull_request_review/submitted.payload.json"),
 		),
-		null,
+		"commented",
 	);
+});
+
+test("deriveStatus: returns null for non-mapped events", () => {
+	// dismissed reviews, opened PRs, and unrelated events.
 	assert.equal(
 		deriveStatus(
 			"pull_request_review",
@@ -435,9 +439,9 @@ test("Reactor.run: with no cached match, paginates channels.list (filtered to is
 		],
 		"conversations.history": [
 			{ body: { ok: true, messages: [matchingMsg], has_more: false } },
-			{ body: { ok: true, messages: [], has_more: false } },
+			{ body: { ok: true, messages: [matchingMsg], has_more: false } },
 		],
-		"reactions.add": [{ body: { ok: true } }],
+		"reactions.add": [{ body: { ok: true } }, { body: { ok: true } }],
 	});
 	const { reactor, prMatches, prKey } = setupReactor({
 		slack,
@@ -445,20 +449,24 @@ test("Reactor.run: with no cached match, paginates channels.list (filtered to is
 		cached: null,
 	});
 	await reactor.run();
-	// channels.list paginated to completion, history scanned for both
-	// is_member channels (C1, C3 — not C2), reaction added on the matching
-	// message in C1, both matches stored in prMatches.
+	// channels.list paginated to completion; both is_member channels (C1, C3
+	// — not C2) scanned in some order (discoverMatches shuffles).
 	assert.equal(
 		calls.filter((c) => c.method === "conversations.list").length,
 		2,
 	);
 	assert.deepEqual(
-		calls
-			.filter((c) => c.method === "conversations.history")
-			.map((c) => c.params.channel),
-		["C1", "C3"],
+		new Set(
+			calls
+				.filter((c) => c.method === "conversations.history")
+				.map((c) => c.params.channel),
+		),
+		new Set(["C1", "C3"]),
 	);
-	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "1.001" }]);
+	assert.deepEqual(
+		new Set(prMatches.get(prKey).map((m) => m.channel)),
+		new Set(["C1", "C3"]),
+	);
 });
 
 test("Reactor.run: discovery rejects /pull/123 ↔ /pull/1234 substring trap", async () => {

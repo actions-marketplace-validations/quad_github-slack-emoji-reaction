@@ -10,6 +10,9 @@ inputs:
   emoji-changes-requested:
     required: false
     description: Emoji name to react with on changes-requested review.
+  emoji-commented:
+    required: false
+    description: Emoji name to react with on a comment-only review.
   emoji-merged:
     required: false
     description: Emoji name to react with on PR merge.
