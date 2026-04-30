@@ -6,19 +6,24 @@ inputs:
     description: Slack bot token (xoxb-…) with channels:read, groups:read, channels:history, groups:history, reactions:read, reactions:write.
   emoji-approved:
     required: false
-    description: Emoji name (no colons) to react with on PR approval.
+    default: white_check_mark
+    description: Emoji name (no colons) to react with on PR approval. Empty disables.
   emoji-changes-requested:
     required: false
-    description: Emoji name to react with on changes-requested review.
+    default: warning
+    description: Emoji name to react with on changes-requested review. Empty disables.
   emoji-commented:
     required: false
-    description: Emoji name to react with on a comment-only review.
+    default: speech_balloon
+    description: Emoji name to react with on a comment-only review. Empty disables.
   emoji-merged:
     required: false
-    description: Emoji name to react with on PR merge.
+    default: large_purple_square
+    description: Emoji name to react with on PR merge. Empty disables.
   emoji-closed:
     required: false
-    description: Emoji name to react with on PR close-without-merge.
+    default: x
+    description: Emoji name to react with on PR close-without-merge. Empty disables.
 runs:
   using: node24
   main: src/index.js

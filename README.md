@@ -4,17 +4,20 @@ Reacts on Slack messages linking to a pull request with emoji that mirror
 the PR's state — `approved` → ✅, `merged` → 🟪, etc. Inspired by
 [jybp/github-slack-emoji-reaction](https://github.com/jybp/github-slack-emoji-reaction).
 
-| Event you trigger on                              | Reacts with               |
-| ------------------------------------------------- | ------------------------- |
-| `pull_request_review.submitted` approved          | `emoji-approved`          |
-| `pull_request_review.submitted` changes_requested | `emoji-changes-requested` |
-| `pull_request_review.submitted` commented         | `emoji-commented`         |
-| `pull_request.closed` (merged)                    | `emoji-merged`            |
-| `pull_request.closed` (not merged)                | `emoji-closed`            |
+| Event you trigger on                              | Input                     | Default                |
+| ------------------------------------------------- | ------------------------- | ---------------------- |
+| `pull_request_review.submitted` approved          | `emoji-approved`          | `white_check_mark`     |
+| `pull_request_review.submitted` changes_requested | `emoji-changes-requested` | `warning`              |
+| `pull_request_review.submitted` commented         | `emoji-commented`         | `speech_balloon`       |
+| `pull_request.closed` (merged)                    | `emoji-merged`            | `large_purple_square`  |
+| `pull_request.closed` (not merged)                | `emoji-closed`            | `x`                    |
 
-Each `emoji-*` input is optional; unset = no reaction. Review dismissals
-are always ignored. `approved` ↔ `changes-requested` flip; `merged` joins
-the existing reactions instead of replacing.
+Set any input to `""` to disable that status. Review dismissals are always
+ignored. `approved` ↔ `changes-requested` flip; `merged` joins the existing
+reactions instead of replacing.
+
+For PR-themed custom emoji (e.g. GitHub's actual review icons), see
+[22a/slack-github-emoji](https://github.com/22a/slack-github-emoji).
 
 ## Install
 
@@ -45,14 +48,10 @@ jobs:
       - uses: quad/github-slack-emoji-reaction@v1
         with:
           slack-token: ${{ secrets.SLACK_TOKEN }}
-          emoji-approved:           white_check_mark
-          emoji-changes-requested:  warning
-          emoji-commented:          speech_balloon
-          emoji-merged:             large_purple_square
-          emoji-closed:             x
 ```
 
-Emoji values are bare names (no `:colons:`); custom workspace emoji works.
+Override any of the `emoji-*` inputs to use custom workspace emoji
+(bare names, no `:colons:`).
 
 > ⚠️ **Install in your own workspace; do not submit to the Slack Marketplace.**
 > Slack rate-limits `conversations.history` to 1 request/minute for newly
