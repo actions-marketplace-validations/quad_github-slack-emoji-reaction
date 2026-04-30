@@ -8,8 +8,11 @@
 	"scripts": {
 		"ci": "biome check && node --test"
 	},
-	"engines": {
-		"node": "24.x"
+	"devEngines": {
+		"runtime": {
+			"name": "node",
+			"version": "24.x"
+		}
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.13"
