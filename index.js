@@ -164,58 +164,71 @@ export class SlackClient {
 		this.#retryAfterCapS = retryAfterCapS;
 	}
 
-	async call(method, params) {
-		const url = this.#apiBase + method;
-		let lastBody;
-		for (let attempt = 0; attempt <= this.#maxRetries; attempt++) {
-			const wait = this.#paceMs - (Date.now() - this.#lastCallAt);
-			if (wait > 0) await sleep(wait);
-			this.#lastCallAt = Date.now();
+	async #pace() {
+		const wait = this.#paceMs - (Date.now() - this.#lastCallAt);
+		if (wait > 0) await sleep(wait);
+		this.#lastCallAt = Date.now();
+	}
 
-			let res;
-			try {
-				res = await this.#fetch(url, {
-					method: "POST",
-					headers: {
-						Authorization: `Bearer ${this.#token}`,
-						"Content-Type": "application/json; charset=utf-8",
-					},
-					body: JSON.stringify(params || {}),
-				});
-				lastBody = await res.json();
-			} catch (e) {
-				console.warn(
-					`slack ${method} network error: ${e.message} (attempt ${attempt + 1}/${this.#maxRetries + 1})`,
-				);
-				if (attempt >= this.#maxRetries)
-					return { ok: false, error: "network_error" };
-				await sleep(1000);
-				continue;
-			}
-
-			// Slack reports rate limiting two ways: 429 with Retry-After, and
-			// HTTP 200 with `{ok:false, error:"ratelimited"}` plus Retry-After.
-			const isRateLimited =
-				res.status === 429 ||
-				(lastBody?.ok === false && lastBody.error === "ratelimited");
-			if (!isRateLimited) {
-				if (lastBody?.ok === false && AUTH_ERRORS.has(lastBody.error)) {
-					throw new AuthError(lastBody.error);
-				}
-				return lastBody;
-			}
-
-			const retry = Math.min(
+	// Outcome:
+	//   { kind: "ok", body }                       — return body
+	//   { kind: "ratelimited", waitMs, body }      — sleep waitMs, retry
+	//   { kind: "network", waitMs, body }          — sleep waitMs, retry
+	// `body` carries what we'd surface if retries are exhausted.
+	async #once(method, params) {
+		let res;
+		try {
+			res = await this.#fetch(this.#apiBase + method, {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${this.#token}`,
+					"Content-Type": "application/json; charset=utf-8",
+				},
+				body: JSON.stringify(params || {}),
+			});
+		} catch (e) {
+			return {
+				kind: "network",
+				waitMs: 1000,
+				body: { ok: false, error: "network_error", message: e.message },
+			};
+		}
+		const body = await res.json();
+		// Slack reports rate limiting two ways: 429 with Retry-After, and
+		// HTTP 200 with `{ok:false, error:"ratelimited"}` plus Retry-After.
+		const rateLimited =
+			res.status === 429 ||
+			(body?.ok === false && body.error === "ratelimited");
+		if (rateLimited) {
+			const secs = Math.min(
 				parseInt(res.headers.get("retry-after"), 10) || 1,
 				this.#retryAfterCapS,
 			);
+			return { kind: "ratelimited", waitMs: secs * 1000, body };
+		}
+		if (body?.ok === false && AUTH_ERRORS.has(body.error)) {
+			throw new AuthError(body.error);
+		}
+		return { kind: "ok", body };
+	}
+
+	async call(method, params) {
+		let outcome;
+		for (let attempt = 0; attempt <= this.#maxRetries; attempt++) {
+			await this.#pace();
+			outcome = await this.#once(method, params);
+			if (outcome.kind === "ok") return outcome.body;
+			const tag = `slack ${method} ${outcome.kind}`;
+			const where = `(attempt ${attempt + 1}/${this.#maxRetries + 1})`;
 			console.warn(
-				`slack ${method} ratelimited; retry-after ${retry}s (attempt ${attempt + 1}/${this.#maxRetries + 1})`,
+				outcome.kind === "network"
+					? `${tag}: ${outcome.body.message} ${where}`
+					: `${tag}; retry-after ${outcome.waitMs / 1000}s ${where}`,
 			);
 			if (attempt >= this.#maxRetries) break;
-			await sleep(retry * 1000);
+			await sleep(outcome.waitMs);
 		}
-		return lastBody;
+		return outcome.body;
 	}
 }
 
