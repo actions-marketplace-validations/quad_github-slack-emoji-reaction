@@ -13,8 +13,7 @@ Inspired by [jybp/github-slack-emoji-reaction](https://github.com/jybp/github-sl
    4. Paste [`manifest.yml`](./manifest.yml) and install.
    5. From **OAuth & Permissions**, copy the **Bot User OAuth Token** (`xoxb-…`).
 2. **Add the token** as the repo secret `SLACK_TOKEN` (**Settings → Secrets and variables → Actions**).
-3. **Invite the bot** in each channel where reactions should appear: `/invite @github-pr-reactions`. Reactions only appear in member channels.
-4. **Add the workflow** at `.github/workflows/slack-emoji-reactions.yml`:
+3. **Add the workflow** at `.github/workflows/slack-emoji-reactions.yml`:
 
    ```yaml
    on:
@@ -35,6 +34,8 @@ Inspired by [jybp/github-slack-emoji-reaction](https://github.com/jybp/github-sl
            with:
              slack-token: ${{ secrets.SLACK_TOKEN }}
    ```
+
+4. **Invite the bot** in each channel where reactions should appear: `/invite @github-pr-reactions`. Reactions only appear in member channels.
 
 ## Configure
 
