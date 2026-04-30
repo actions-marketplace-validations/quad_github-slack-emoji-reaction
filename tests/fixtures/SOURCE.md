@@ -18,13 +18,5 @@ are produced by overriding a single field on the relevant upstream payload
 inside `index.test.js`. The override sites are explicit so the dependence
 on the underlying authoritative shape is clear.
 
-To refresh:
-
-```sh
-SHA=<new-sha>
-for f in pull_request/closed.payload.json pull_request/opened.payload.json \
-         pull_request_review/submitted.payload.json pull_request_review/dismissed.payload.json; do
-  gh api "repos/octokit/webhooks/contents/payload-examples/api.github.com/$f?ref=$SHA" \
-    --jq '.content' | base64 -d > "fixtures/upstream/$f"
-done
-```
+To refresh, run [`scripts/refresh-fixtures.sh`](../../scripts/refresh-fixtures.sh)
+with the new SHA, then update the SHA and date above.
