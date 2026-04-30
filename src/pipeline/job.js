@@ -25,7 +25,8 @@ const PR_QUERY = `query($owner: String!, $repo: String!, $num: Int!) {
       merged
       closed
       reviewDecision
-      reviews(first: 100, states: [COMMENTED]) { nodes { author { __typename } } }
+      author { login }
+      reviews(first: 100, states: [COMMENTED]) { nodes { author { __typename, login } } }
     }
   }
 }`;
@@ -49,7 +50,10 @@ export async function fetchPRState(github, pr) {
 		merged: p.merged,
 		closed: p.closed,
 		reviewDecision: REVIEW_DECISION[p.reviewDecision] ?? null,
-		hasUserComment: p.reviews.nodes.some((r) => r.author?.__typename !== "Bot"),
+		hasUserComment: p.reviews.nodes.some(
+			(r) =>
+				r.author?.__typename !== "Bot" && r.author?.login !== p.author?.login,
+		),
 	};
 }
 

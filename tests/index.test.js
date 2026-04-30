@@ -106,10 +106,12 @@ test("fetchPRState: parses GraphQL pullRequest into reconciliation state", async
 							merged: true,
 							closed: true,
 							reviewDecision: "APPROVED",
+							author: { login: "octo-author" },
 							reviews: {
 								nodes: [
-									{ author: { __typename: "User" } },
-									{ author: { __typename: "Bot" } },
+									{ author: { __typename: "User", login: "octo-reviewer" } },
+									{ author: { __typename: "User", login: "octo-author" } },
+									{ author: { __typename: "Bot", login: "dependabot" } },
 								],
 							},
 						},
@@ -137,6 +139,35 @@ test("fetchPRState: parses GraphQL pullRequest into reconciliation state", async
 		repo: "hello",
 		num: 42,
 	});
+});
+
+test("fetchPRState: ignores self-comments by the PR author", async (t) => {
+	t.mock.method(globalThis, "fetch", async () => ({
+		ok: true,
+		status: 200,
+		json: async () => ({
+			data: {
+				repository: {
+					pullRequest: {
+						merged: false,
+						closed: false,
+						reviewDecision: null,
+						author: { login: "octo-author" },
+						reviews: {
+							nodes: [{ author: { __typename: "User", login: "octo-author" } }],
+						},
+					},
+				},
+			},
+		}),
+	}));
+	const github = new GitHubClient("ghs_token", new AbortController().signal);
+	const state = await fetchPRState(github, {
+		owner: "octo",
+		repo: "hello",
+		num: 42,
+	});
+	assert.equal(state.hasUserComment, false);
 });
 
 // ---------------------------------------------------------------- prContext
