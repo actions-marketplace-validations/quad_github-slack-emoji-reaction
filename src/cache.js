@@ -57,7 +57,8 @@ export class CacheClient {
 			const meta = await this.#lookup(signal);
 			if (!meta?.archiveLocation) return null;
 			const blob = await fetch(meta.archiveLocation, { signal });
-			return blob.ok ? await blob.json() : null;
+			if (!blob.ok) throw new Error(`blob fetch ${blob.status}`);
+			return await blob.json();
 		} catch (e) {
 			if (e instanceof DOMException) throw e;
 			log.warn(`cache restore failed: ${e.message}`);
@@ -70,8 +71,7 @@ export class CacheClient {
 		try {
 			const body = Buffer.from(JSON.stringify(state), "utf8");
 			const cacheId = await this.#reserve(body.length);
-			if (!cacheId) return;
-			if (!(await this.#upload(cacheId, body))) return;
+			await this.#upload(cacheId, body);
 			await this.#commit(cacheId, body.length);
 		} catch (e) {
 			log.warn(`cache save failed: ${e.message}`);
@@ -88,7 +88,10 @@ export class CacheClient {
 		);
 		url.searchParams.set("version", CacheClient.#VERSION);
 		const res = await this.#send(url, { signal });
-		return res.ok ? await res.json() : null;
+		// 204 = no cache entry yet; that's normal "first run", not an error.
+		if (res.status === 204) return null;
+		if (!res.ok) throw new Error(`lookup ${res.status}`);
+		return await res.json();
 	}
 
 	async #reserve(size) {
@@ -101,7 +104,10 @@ export class CacheClient {
 				cacheSize: size,
 			}),
 		});
-		return res.ok ? ((await res.json())?.cacheId ?? null) : null;
+		if (!res.ok) throw new Error(`reserve ${res.status}`);
+		const cacheId = (await res.json())?.cacheId;
+		if (!cacheId) throw new Error("reserve: no cacheId in response");
+		return cacheId;
 	}
 
 	async #upload(cacheId, body) {
@@ -113,14 +119,15 @@ export class CacheClient {
 			},
 			body,
 		});
-		return res.ok;
+		if (!res.ok) throw new Error(`upload ${res.status}`);
 	}
 
 	async #commit(cacheId, size) {
-		await this.#send(this.#url(`caches/${cacheId}`), {
+		const res = await this.#send(this.#url(`caches/${cacheId}`), {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ size }),
 		});
+		if (!res.ok) throw new Error(`commit ${res.status}`);
 	}
 }
