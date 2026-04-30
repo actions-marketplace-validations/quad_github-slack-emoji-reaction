@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# Refresh tests/fixtures/upstream/ from octokit/webhooks at the given SHA.
-# Usage: scripts/refresh-fixtures.sh <sha>
-# After refresh, update SHA + date in tests/fixtures/SOURCE.md.
+# Refresh tests/fixtures/upstream/ from octokit/webhooks at the given ref
+# (default: main), and update the pin (SHA + date) in tests/fixtures/README.md.
+# Usage: scripts/refresh-fixtures.sh [ref]
 
 set -euo pipefail
 
-if [ $# -ne 1 ]; then
-	echo "usage: $0 <sha>" >&2
-	exit 2
-fi
-
-sha=$1
+ref=${1:-main}
 root=$(git rev-parse --show-toplevel)
 out="$root/tests/fixtures/upstream"
+readme="$root/tests/fixtures/README.md"
+
+read -r sha date < <(
+	gh api "repos/octokit/webhooks/commits/$ref" \
+		--jq '[.sha, (.commit.committer.date | split("T")[0])] | @tsv'
+)
+echo "resolved $ref → $sha ($date)"
 
 cd "$out"
 for f in $(find . -type f -name '*.payload.json' | sed 's|^\./||'); do
@@ -21,4 +23,6 @@ for f in $(find . -type f -name '*.payload.json' | sed 's|^\./||'); do
 		--jq '.content' | base64 -d > "$f"
 done
 
-echo "done. update SHA + date in tests/fixtures/SOURCE.md"
+perl -i -pe "s/at commit \`[0-9a-f]{40}\` \([0-9-]{10}\)/at commit \`$sha\` ($date)/" "$readme"
+
+echo "done"

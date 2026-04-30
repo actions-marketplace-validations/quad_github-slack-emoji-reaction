@@ -12,7 +12,7 @@ import { SlackClient } from "../src/slack.js";
 
 // ============================================================ static helpers
 
-// Authoritative payloads vendored from octokit/webhooks; see fixtures/SOURCE.md.
+// Authoritative payloads vendored from octokit/webhooks; see fixtures/README.md.
 // Parsed once per file, structuredClone'd at each call so tests can mutate freely.
 const fixtureCache = new Map();
 const upstream = (rel) => {
