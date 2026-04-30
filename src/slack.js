@@ -1,22 +1,22 @@
 import { retry } from "./async.js";
 import { FatalError } from "./errors.js";
 
-// Thrown by #callOnce on 429 / ok:false ratelimited responses. Carries the
-// body so call()'s catch can surface it on retry exhaustion, plus the
-// retry-after deadline so the retry loop knows when to wake.
+// Fetch-level failure (DNS, TCP, etc.). FatalError so retry-exhausted
+// network failures propagate to main()'s top-level catch with a clean
+// message + cause chain.
+class NetworkError extends FatalError {
+	constructor(method, cause) {
+		super(`Slack ${method} failed: ${cause.message}`, { cause });
+	}
+}
+
+// 429 / ok:false ratelimited. Carries the body for call()'s catch to
+// surface on retry exhaustion, plus the retry-after deadline.
 class RateLimitError extends Error {
 	constructor(body, deadlineMs) {
 		super();
 		this.body = body;
 		this.deadlineMs = deadlineMs;
-	}
-}
-
-// Thrown by #callOnce when fetch itself fails (DNS, TCP, etc.). call()'s
-// catch synthesises a Slack-shaped body on exhaustion.
-class NetworkError extends Error {
-	constructor(cause) {
-		super(undefined, { cause });
 	}
 }
 
@@ -55,11 +55,9 @@ export class SlackClient {
 						: Date.now() + SlackClient.#networkBackoffMs(),
 			});
 		} catch (e) {
-			// Retry exhausted: surface a body so callers read .ok/.error
-			// without needing try/catch. Auth + abort errors propagate.
+			// Rate-limit exhausted → surface body; callers read .ok/.error.
+			// Auth, abort, network errors propagate as FatalError.
 			if (e instanceof RateLimitError) return e.body;
-			if (e instanceof NetworkError)
-				return { ok: false, error: "network_error", message: e.cause.message };
 			throw e;
 		}
 	}
@@ -78,7 +76,7 @@ export class SlackClient {
 			});
 		} catch (e) {
 			if (e instanceof DOMException) throw e;
-			throw new NetworkError(e);
+			throw new NetworkError(method, e);
 		}
 		const body = await res.json();
 		// Slack reports rate limiting two ways: 429 with Retry-After, and

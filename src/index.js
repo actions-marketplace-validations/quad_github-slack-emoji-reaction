@@ -83,7 +83,7 @@ export function prContext(payload) {
 
 async function fetchBotUserId(slack) {
 	const res = await slack.call("auth.test", {});
-	if (!res.ok) throw new FatalError(`Slack auth.test failed: ${res.error}`);
+	if (!res.ok) throw FatalError.fromSlack("auth.test", res);
 	return res.user_id;
 }
 
@@ -98,9 +98,7 @@ async function fetchChannels(slack) {
 		},
 		Infinity,
 	)) {
-		if (!res.ok) {
-			throw new FatalError(`Slack conversations.list failed: ${res.error}`);
-		}
+		if (!res.ok) throw FatalError.fromSlack("conversations.list", res);
 		for (const c of res.channels) {
 			if (c.is_member) out.push({ id: c.id, name: c.name });
 		}
