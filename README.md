@@ -1,7 +1,8 @@
 # github-slack-emoji-reaction
 
-Reacts on Slack messages linking to a pull request with emoji that mirror the
-PR's state — `approved` → ✅, `merged` → 🟪, etc.
+Reacts on Slack messages linking to a pull request with emoji that mirror
+the PR's state — `approved` → ✅, `merged` → 🟪, etc. Inspired by
+[jybp/github-slack-emoji-reaction](https://github.com/jybp/github-slack-emoji-reaction).
 
 | Event you trigger on                              | Reacts with               |
 | ------------------------------------------------- | ------------------------- |
@@ -11,44 +12,20 @@ PR's state — `approved` → ✅, `merged` → 🟪, etc.
 | `pull_request.closed` (merged)                    | `emoji-merged`            |
 | `pull_request.closed` (not merged)                | `emoji-closed`            |
 
-Review dismissals are ignored. Each `emoji-*` input is optional, so noisy
-states (e.g. CI bots filing constant comment-only reviews) can be silenced
-by leaving the corresponding input unset.
+Each `emoji-*` input is optional; unset = no reaction. Review dismissals
+are always ignored. `approved` ↔ `changes-requested` flip; `merged` joins
+the existing reactions instead of replacing.
 
 ## Install
 
-### 1. Create the Slack app
-
-1. Go to <https://api.slack.com/apps>.
-2. Click **Create New App** → **From a manifest**.
-3. Pick your workspace.
-4. Paste [`manifest.yml`](./manifest.yml) and install.
-5. From **OAuth & Permissions**, copy the **Bot User OAuth Token** (`xoxb-…`).
-
-> ⚠️ **Install in your own workspace; do not submit to the Slack Marketplace.**
-> Slack rate-limits `conversations.history` to 1 request/minute for newly
-> distributed Marketplace apps. Workspace-internal apps keep the standard
-> ~50/minute, which this action depends on.
-
-### 2. Add the token
-
-1. In your repo, go to **Settings → Secrets and variables → Actions**.
-2. Click **New repository secret**.
-3. Name it `SLACK_TOKEN` with the `xoxb-…` token as the value.
-
-### 3. Invite the bot
-
-In each Slack channel where reactions should appear:
-
-```
-/invite @github-pr-reactions
-```
-
-Reactions only appear in channels the bot is a member of.
-
-### 4. Add the workflow
-
-Create `.github/workflows/slack-emoji-reactions.yml`:
+1. **Create the Slack app.** At <https://api.slack.com/apps>, **Create New
+   App** → **From a manifest** → paste [`manifest.yml`](./manifest.yml) →
+   install. Copy the **Bot User OAuth Token** (`xoxb-…`).
+2. **Add the token** as the repo secret `SLACK_TOKEN`
+   (**Settings → Secrets and variables → Actions**).
+3. **Invite the bot** in each channel where reactions should appear:
+   `/invite @github-pr-reactions`. Reactions only appear in member channels.
+4. **Add the workflow** at `.github/workflows/slack-emoji-reactions.yml`:
 
 ```yaml
 on:
@@ -75,48 +52,27 @@ jobs:
           emoji-closed:             x
 ```
 
-Emoji values are bare names (no `:colons:`). Custom emoji works too — use the
-name registered in your workspace. Each `emoji-*` input is optional; an unset
-status is a no-op.
+Emoji values are bare names (no `:colons:`); custom workspace emoji works.
 
-## What to expect
-
-- The bot reacts to the most recent message in each channel that contains a
-  link to the PR. If the same PR is posted in multiple channels the bot is in,
-  each gets a reaction.
-- `approved` and `changes-requested` flip back and forth: when one applies,
-  the bot removes its own opposite reaction (never anyone else's).
-- `merged` is additive — it joins `approved`/`changes-requested` rather than
-  replacing them, so a merged PR's message tells the whole story.
-- Re-running an old workflow is safe; the bot won't reverse a later real
-  state change.
+> ⚠️ **Install in your own workspace; do not submit to the Slack Marketplace.**
+> Slack rate-limits `conversations.history` to 1 request/minute for newly
+> distributed Marketplace apps. Workspace-internal apps keep the standard
+> ~50/minute, which this action depends on.
 
 ## Limits
 
-- Only top-level messages are scanned (thread replies are not).
-- The bot looks back 30 days. PRs whose Slack post is older won't get
-  reactions on subsequent state changes.
-- Up to 100 bot-member channels per run; invite the bot deliberately to
-  channels where it's wanted.
+- Top-level messages only (thread replies aren't scanned).
+- 30-day lookback. PRs whose Slack post is older won't get reactions on
+  later state changes.
+- Up to 100 bot-member channels and 50 reactions per event; the rest carry
+  over to the next event for the same PR.
 
 ## Troubleshooting
 
-If a reaction doesn't appear, check the workflow run log. The action only
-emits output when something needs your attention:
-
-| Message                                              | What it means                                                        |
-| ---------------------------------------------------- | -------------------------------------------------------------------- |
-| `slack-token is missing`                             | Set the `SLACK_TOKEN` secret. (Fork PRs run with empty secrets — that's expected and silent.) |
-| `Slack auth error: invalid_auth`                     | Token is wrong or revoked. Generate a fresh one and update the secret. |
-| `reactions.<add\|get\|remove> … <error>`             | A specific reaction call failed with an unexpected error (e.g. `invalid_name` — check the emoji input). |
-
-For deeper debugging, set the repo secret `ACTIONS_STEP_DEBUG` to `true` and
-re-run the workflow.
+Check the workflow log. The action is silent on the happy path; warnings
+and errors print as GHA annotations. Set the repo secret
+`ACTIONS_STEP_DEBUG=true` for verbose output.
 
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md).
-
-## Inspiration
-
-Inspired by [jybp/github-slack-emoji-reaction](https://github.com/jybp/github-slack-emoji-reaction).
