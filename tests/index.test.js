@@ -117,7 +117,7 @@ function shimFetch(scripts) {
 		queues.set(method, [...responses]);
 	}
 	const impl = async (url, opts) => {
-		const method = url.replace("https://slack.com/api/", "");
+		const method = String(url).replace("https://slack.com/api/", "");
 		const params = JSON.parse(opts.body || "{}");
 		calls.push({ method, params });
 		const queue = queues.get(method);
