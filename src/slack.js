@@ -89,9 +89,9 @@ export class SlackClient {
 			method: "POST",
 			headers: {
 				Authorization: `Bearer ${this.#token}`,
-				"Content-Type": "application/json; charset=utf-8",
+				"Content-Type": "application/x-www-form-urlencoded",
 			},
-			body: JSON.stringify(params || {}),
+			body: new URLSearchParams(params || {}).toString(),
 			signal: this.#signal,
 		});
 	}

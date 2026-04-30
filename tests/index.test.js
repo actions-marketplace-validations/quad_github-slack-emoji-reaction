@@ -169,7 +169,7 @@ function shimFetch(scripts) {
 	}
 	const impl = async (url, opts) => {
 		const method = String(url).replace("https://slack.com/api/", "");
-		const params = JSON.parse(opts.body || "{}");
+		const params = Object.fromEntries(new URLSearchParams(opts.body || ""));
 		calls.push({ method, params });
 		const queue = queues.get(method);
 		if (!queue || queue.length === 0) {
