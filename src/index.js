@@ -174,11 +174,6 @@ export class Reactor {
 	async #applyReactions(matches) {
 		const prKey = this.#job.prKey;
 		const toReact = matches.slice(0, REACTIONS_PER_RUN_CAP);
-		if (matches.length > REACTIONS_PER_RUN_CAP) {
-			console.warn(
-				`reactions-per-run cap (${REACTIONS_PER_RUN_CAP}) reached; ${matches.length - REACTIONS_PER_RUN_CAP} kept in cache for next run`,
-			);
-		}
 
 		// Persist the full set up-front so a throw mid-loop still leaves the
 		// discovered matches in cache for the next run; keep it in sync as
@@ -316,8 +311,7 @@ async function main() {
 	try {
 		await reactor.run();
 	} finally {
-		const evicted = prMatches.evictOldestPast(MAX_PR_ENTRIES);
-		if (evicted) console.warn(`pr-entries safety cap; evicted ${evicted}`);
+		prMatches.evictOldestPast(MAX_PR_ENTRIES);
 		await cache.save({ memo, prMatches });
 	}
 }

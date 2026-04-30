@@ -40,18 +40,16 @@ export class Memo {
 	}
 
 	// Eviction strategy: keep the `max` most-recently-refreshed entries
-	// (oldest refreshedAt dropped first). Returns count evicted. LRU-shaped
-	// only when every interaction with a key ends in a set — true for
-	// prMatches but not in general; readers shouldn't bank on it.
+	// (oldest refreshedAt dropped first). LRU-shaped only when every
+	// interaction with a key ends in a set — true for prMatches but not in
+	// general; readers shouldn't bank on it.
 	evictOldestPast(max) {
 		const keys = Object.keys(this.#cells);
-		if (keys.length <= max) return 0;
+		if (keys.length <= max) return;
 		keys.sort(
 			(a, b) => this.#cells[a].refreshedAt - this.#cells[b].refreshedAt,
 		);
-		const evict = keys.slice(0, keys.length - max);
-		for (const k of evict) delete this.#cells[k];
-		return evict.length;
+		for (const k of keys.slice(0, keys.length - max)) delete this.#cells[k];
 	}
 
 	toJSON() {

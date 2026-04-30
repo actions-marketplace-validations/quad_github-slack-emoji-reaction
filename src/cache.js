@@ -34,6 +34,9 @@ export class CacheClient {
 		});
 	}
 
+	// Failures are silent: action proceeds with empty state, performance
+	// degrades, but nothing externally-visible breaks. GHA cache hiccups
+	// aren't operator-actionable.
 	async restore(signal) {
 		if (!this.#enabled) return null;
 		try {
@@ -46,26 +49,17 @@ export class CacheClient {
 			);
 			lookup.searchParams.set("version", CacheClient.#VERSION);
 			const res = await fetch(lookup, { headers: this.#headers, signal });
-			if (res.status === 204) return null;
-			if (!res.ok) {
-				console.warn(`cache restore lookup status ${res.status}`);
-				return null;
-			}
+			if (!res.ok) return null;
 			const meta = await res.json();
 			if (!meta?.archiveLocation) return null;
 			const blob = await fetch(meta.archiveLocation, { signal });
-			if (!blob.ok) {
-				console.warn(`cache blob fetch status ${blob.status}`);
-				return null;
-			}
+			if (!blob.ok) return null;
 			return await blob.json();
-		} catch (e) {
-			console.warn(`cache restore failed: ${e.message}`);
+		} catch {
 			return null;
 		}
 	}
 
-	// No signal: save runs in finally to persist progress past any abort.
 	async save(state) {
 		if (!this.#enabled) return;
 		try {
@@ -80,10 +74,7 @@ export class CacheClient {
 					cacheSize: body.length,
 				}),
 			});
-			if (!reserveRes.ok) {
-				console.warn(`cache reserve status ${reserveRes.status}`);
-				return;
-			}
+			if (!reserveRes.ok) return;
 			const cacheId = (await reserveRes.json())?.cacheId;
 			if (!cacheId) return;
 
@@ -95,21 +86,15 @@ export class CacheClient {
 				},
 				body,
 			});
-			if (!uploadRes.ok) {
-				console.warn(`cache upload status ${uploadRes.status}`);
-				return;
-			}
+			if (!uploadRes.ok) return;
 
-			const commitRes = await this.#send(`caches/${cacheId}`, {
+			await this.#send(`caches/${cacheId}`, {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ size: body.length }),
 			});
-			if (!commitRes.ok) {
-				console.warn(`cache commit status ${commitRes.status}`);
-			}
-		} catch (e) {
-			console.warn(`cache save failed: ${e.message}`);
+		} catch {
+			// swallow
 		}
 	}
 }
