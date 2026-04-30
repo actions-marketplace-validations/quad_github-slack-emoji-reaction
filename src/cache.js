@@ -3,8 +3,11 @@ import * as log from "./log.js";
 // Restore/save state against the GHA Cache v1 API. ACTIONS_CACHE_URL +
 // ACTIONS_RUNTIME_TOKEN are auto-injected into every workflow job.
 export class CacheClient {
-	static #KEY_PREFIX = "slack-emoji-reactions-state-";
-	static #VERSION = "slack-emoji-reactions-v1";
+	// Namespaced so this action's entries don't collide with anything else
+	// in the per-repo GHA cache.
+	static #BASE = "substrate-github-slack-emoji-reaction";
+	static #KEY_PREFIX = `${CacheClient.#BASE}-state-`;
+	static #VERSION = `${CacheClient.#BASE}-v1`;
 
 	#base;
 	#token;
