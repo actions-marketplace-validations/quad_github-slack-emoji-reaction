@@ -27,7 +27,7 @@ Inspired by [jybp/github-slack-emoji-reaction](https://github.com/jybp/github-sl
      react:
        runs-on: ubuntu-latest
        steps:
-         - uses: quad/github-slack-emoji-reaction@v1
+         - uses: quad/github-slack-emoji-reaction@v2
            with:
              slack-token: ${{ secrets.SLACK_TOKEN }}
    ```
@@ -49,7 +49,7 @@ Override any `emoji-*` input in the workflow `with:` block. Use bare names (no `
 For nicer GitHub-themed Slack emoji, see [22a/slack-github-emoji](https://github.com/22a/slack-github-emoji). Once installed in your workspace:
 
 ```yaml
-- uses: quad/github-slack-emoji-reaction@v1
+- uses: quad/github-slack-emoji-reaction@v2
   with:
     slack-token: ${{ secrets.SLACK_TOKEN }}
     emoji-approved: approved
