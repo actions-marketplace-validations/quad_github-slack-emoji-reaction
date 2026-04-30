@@ -71,7 +71,7 @@ export class SlackClient {
 			throw new NetworkError(method, e);
 		}
 		const body = await res.json();
-		SlackClient.#enforceRateLimit(res, body);
+		SlackClient.#enforceRateLimit(method, res, body);
 		SlackClient.#enforceAuth(body);
 		return body;
 	}
@@ -89,16 +89,21 @@ export class SlackClient {
 	}
 
 	// Slack reports rate limiting two ways: 429 with Retry-After, and HTTP
-	// 200 with `{ok:false, error:"ratelimited"}` plus Retry-After.
-	static #enforceRateLimit(res, body) {
+	// 200 with `{ok:false, error:"ratelimited"}` plus Retry-After. If the
+	// requested wait exceeds our patience threshold, give up and let the
+	// next workflow run pick this up — disrespecting Retry-After would
+	// just earn another 429.
+	static #enforceRateLimit(method, res, body) {
 		const limited =
 			res.status === 429 ||
 			(body?.ok === false && body.error === "ratelimited");
 		if (!limited) return;
-		const secs = Math.min(
-			Number(res.headers.get("retry-after")) || 1,
-			SlackClient.#RETRY_AFTER_CAP_S,
-		);
+		const secs = Number(res.headers.get("retry-after")) || 1;
+		if (secs > SlackClient.#RETRY_AFTER_CAP_S) {
+			throw new FatalError(
+				`Slack ${method} rate limit too long: ${secs}s exceeds ${SlackClient.#RETRY_AFTER_CAP_S}s; retry later`,
+			);
+		}
 		throw new RateLimitError(body, Date.now() + secs * 1000);
 	}
 
