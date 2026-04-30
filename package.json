@@ -1,6 +1,6 @@
 {
 	"name": "github-slack-emoji-reaction",
-	"version": "2.0.1",
+	"version": "2.0.2",
 	"description": "GitHub Action that reacts on Slack messages linking to a GitHub PR with PR-status emoji.",
 	"private": true,
 	"type": "module",
