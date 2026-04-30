@@ -21,9 +21,12 @@ For PR-themed custom emoji (e.g. GitHub's actual review icons), see
 
 ## Install
 
-1. **Create the Slack app.** At <https://api.slack.com/apps>, **Create New
-   App** → **From a manifest** → paste [`manifest.yml`](./manifest.yml) →
-   install. Copy the **Bot User OAuth Token** (`xoxb-…`).
+1. **Create the Slack app:**
+   1. Go to <https://api.slack.com/apps>.
+   2. Click **Create New App** → **From a manifest**.
+   3. Pick your workspace.
+   4. Paste [`manifest.yml`](./manifest.yml) and install.
+   5. From **OAuth & Permissions**, copy the **Bot User OAuth Token** (`xoxb-…`).
 2. **Add the token** as the repo secret `SLACK_TOKEN`
    (**Settings → Secrets and variables → Actions**).
 3. **Invite the bot** in each channel where reactions should appear:
