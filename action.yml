@@ -7,23 +7,23 @@ inputs:
   emoji-approved:
     required: false
     default: white_check_mark
-    description: Emoji name (no colons) to react with on PR approval. Empty disables.
+    description: Emoji name (no colons) for approved reviews; empty to disable.
   emoji-changes-requested:
     required: false
     default: warning
-    description: Emoji name to react with on changes-requested review. Empty disables.
+    description: Emoji for changes-requested reviews; empty to disable.
   emoji-commented:
     required: false
     default: speech_balloon
-    description: Emoji name to react with on a comment-only review. Empty disables.
+    description: Emoji for comment-only reviews; empty to disable.
   emoji-merged:
     required: false
-    default: large_purple_square
-    description: Emoji name to react with on PR merge. Empty disables.
+    default: rocket
+    description: Emoji for merged PRs; empty to disable.
   emoji-closed:
     required: false
     default: x
-    description: Emoji name to react with on PR close-without-merge. Empty disables.
+    description: Emoji for closed-without-merge PRs; empty to disable.
 runs:
   using: node24
   main: src/index.js
