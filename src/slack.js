@@ -53,7 +53,7 @@ export class SlackClient {
 				getDeadline: (e) =>
 					e instanceof RateLimitError
 						? e.deadlineMs
-						: Date.now() + SlackClient.#NETWORK_RETRY_MS,
+						: Date.now() + SlackClient.#networkBackoffMs(),
 				onRetry: (e, attempt) =>
 					console.warn(SlackClient.#retryMessage(method, e, attempt)),
 			});
@@ -116,6 +116,14 @@ export class SlackClient {
 			cursor = res.response_metadata?.next_cursor || "";
 			if (!cursor) return;
 		}
+	}
+
+	// Half jitter on the network retry: uniformly distributed over
+	// [base, 2*base) so concurrent runs hit Slack on staggered schedules.
+	// Slack's Retry-After is server-driven; we don't jitter that path.
+	static #networkBackoffMs() {
+		const base = SlackClient.#NETWORK_RETRY_MS;
+		return base + Math.random() * base;
 	}
 
 	static #retryMessage(method, error, attempt) {
