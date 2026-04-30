@@ -404,23 +404,33 @@ export async function fetchBotUserId(slack) {
 	return res.user_id;
 }
 
-export async function fetchChannels(slack) {
-	const out = [];
+// Yields successive Slack pages, threading cursor through. Consumers
+// drive termination: drain to completion, cap page count, break on hit,
+// throw on error — all just standard for-await control flow.
+async function* paginate(slack, method, baseParams) {
 	let cursor = "";
 	while (true) {
-		const params = {
-			types: "public_channel,private_channel",
-			exclude_archived: true,
-			limit: 200,
-		};
+		const params = { ...baseParams };
 		if (cursor) params.cursor = cursor;
-		const res = await slack.call("conversations.list", params);
+		const res = await slack.call(method, params);
+		yield res;
+		if (!res.ok) return;
+		cursor = res.response_metadata?.next_cursor || "";
+		if (!cursor) return;
+	}
+}
+
+export async function fetchChannels(slack) {
+	const out = [];
+	for await (const res of paginate(slack, "conversations.list", {
+		types: "public_channel,private_channel",
+		exclude_archived: true,
+		limit: 200,
+	})) {
 		if (!res.ok) throw new Error(`conversations.list failed: ${res.error}`);
 		for (const c of res.channels) {
 			if (c.is_member) out.push({ id: c.id, name: c.name });
 		}
-		cursor = res.response_metadata?.next_cursor || "";
-		if (!cursor) break;
 	}
 	return out;
 }
@@ -434,11 +444,12 @@ export async function discoverMatches(slack, pr, channels) {
 	const matches = [];
 	const oldest = String(nowS() - HISTORY_LOOKBACK_S);
 	for (const ch of channels.slice(0, MAX_CHANNELS_PER_RUN)) {
-		let cursor = "";
-		for (let page = 0; page < HISTORY_PAGES_PER_CHANNEL; page++) {
-			const params = { channel: ch.id, oldest, limit: 200 };
-			if (cursor) params.cursor = cursor;
-			const res = await slack.call("conversations.history", params);
+		let page = 0;
+		for await (const res of paginate(slack, "conversations.history", {
+			channel: ch.id,
+			oldest,
+			limit: 200,
+		})) {
 			if (!res.ok) {
 				console.warn(
 					`conversations.history ${ch.id}(${ch.name}): ${res.error}`,
@@ -452,8 +463,7 @@ export async function discoverMatches(slack, pr, channels) {
 				matches.push({ channel: ch.id, ts: hit.ts });
 				break;
 			}
-			cursor = res.response_metadata?.next_cursor || "";
-			if (!cursor || !res.has_more) break;
+			if (++page >= HISTORY_PAGES_PER_CHANNEL) break;
 		}
 	}
 	return matches;
