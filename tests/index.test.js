@@ -141,7 +141,11 @@ function shimFetch(scripts) {
 // shared module state to reset between tests.
 const slackFor = (scripts) => {
 	const { impl, calls } = shimFetch(scripts);
-	const slack = new SlackClient({ token: "xoxb", fetch: impl });
+	const slack = new SlackClient({
+		token: "xoxb",
+		fetch: impl,
+		signal: new AbortController().signal,
+	});
 	return { slack, calls };
 };
 

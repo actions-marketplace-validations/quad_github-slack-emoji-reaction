@@ -2,9 +2,9 @@ import { FatalError } from "./errors.js";
 
 const sleep = (ms, signal) =>
 	new Promise((resolve, reject) => {
-		if (signal?.aborted) return reject(signal.reason);
+		if (signal.aborted) return reject(signal.reason);
 		const timer = setTimeout(resolve, ms);
-		signal?.addEventListener(
+		signal.addEventListener(
 			"abort",
 			() => {
 				clearTimeout(timer);
@@ -50,7 +50,7 @@ export class SlackClient {
 				signal: this.#signal,
 			});
 		} catch (e) {
-			if (this.#signal?.aborted) throw this.#signal.reason;
+			if (this.#signal.aborted) throw this.#signal.reason;
 			return {
 				kind: "network",
 				waitMs: 1000,
@@ -81,7 +81,7 @@ export class SlackClient {
 	async call(method, params) {
 		let outcome;
 		for (let attempt = 0; attempt <= SlackClient.#MAX_RETRIES; attempt++) {
-			this.#signal?.throwIfAborted();
+			this.#signal.throwIfAborted();
 			outcome = await this.#callOnce(method, params);
 			if (outcome.kind === "ok") return outcome.body;
 			const tag = `slack ${method} ${outcome.kind}`;
