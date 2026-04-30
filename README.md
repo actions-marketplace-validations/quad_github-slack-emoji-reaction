@@ -67,6 +67,7 @@ Behavior: review dismissals are always ignored. `approved` ↔ `changes-requeste
 ## Limits
 
 - ⚠️ Install the Slack app in your own workspace; do not submit to the Slack Marketplace. Marketplace apps hit a Slack rate limit that breaks this action.
+- Forked PRs run without a token; the action treats this as expected and exits cleanly.
 - Top-level messages only (thread replies aren't scanned).
 - 30-day lookback. PRs whose Slack post is older won't get reactions on later state changes.
 - Up to 100 bot-member channels and 50 reactions per run; the rest carry over to the next run for the same PR.
