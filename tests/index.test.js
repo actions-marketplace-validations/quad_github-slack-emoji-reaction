@@ -77,6 +77,22 @@ test("deriveStatus: pull_request_review submitted commented → commented", () =
 	);
 });
 
+test("deriveStatus: comment-only review by a Bot reviewer is filtered (returns null)", () => {
+	const payload = variant("pull_request_review/submitted.payload.json", {
+		"review.user.type": "Bot",
+	});
+	assert.equal(deriveStatus("pull_request_review", payload), null);
+});
+
+test("deriveStatus: bot filter does NOT apply to approved reviews", () => {
+	// Auto-approve bots are usually meaningful; only the noisy comment path is filtered.
+	const payload = variant("pull_request_review/submitted.payload.json", {
+		"review.state": "approved",
+		"review.user.type": "Bot",
+	});
+	assert.equal(deriveStatus("pull_request_review", payload), "approved");
+});
+
 test("deriveStatus: returns null for non-mapped events", () => {
 	// dismissed reviews, opened PRs, and unrelated events.
 	assert.equal(
