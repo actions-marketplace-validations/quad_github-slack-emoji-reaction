@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { promisify } from "node:util";
-
-const execFileP = promisify(execFile);
 
 // Spawn `node index.js` the way GHA does: GITHUB_EVENT_NAME +
 // GITHUB_EVENT_PATH point at the payload, INPUT_* carry the action
@@ -12,9 +9,10 @@ const execFileP = promisify(execFile);
 // reaches Slack, AuthError fires, top-level catch prints the message
 // and exits 1. That round-trip is the wiring this test guards.
 
-test("spawn: pull_request closed reaches auth and exits with AuthError", async () => {
-	const out = await execFileP(process.execPath, ["index.js"], {
+test("spawn: pull_request closed reaches auth and exits with AuthError", () => {
+	const r = spawnSync(process.execPath, ["index.js"], {
 		cwd: import.meta.dirname,
+		encoding: "utf8",
 		env: {
 			...process.env,
 			GITHUB_EVENT_NAME: "pull_request",
@@ -22,7 +20,7 @@ test("spawn: pull_request closed reaches auth and exits with AuthError", async (
 			"INPUT_SLACK-TOKEN": "xoxb-fake-token-for-integration-tests",
 			"INPUT_EMOJI-CLOSED": "x",
 		},
-	}).catch((e) => ({ stdout: e.stdout, stderr: e.stderr, code: e.code }));
-	assert.equal(out.code, 1, out.stdout + out.stderr);
-	assert.match(out.stderr, /Slack auth error: invalid_auth/);
+	});
+	assert.equal(r.status, 1, r.stdout + r.stderr);
+	assert.match(r.stderr, /Slack auth error: invalid_auth/);
 });
