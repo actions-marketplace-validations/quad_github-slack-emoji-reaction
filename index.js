@@ -470,9 +470,8 @@ export class Reactor {
 		return discoverMatches(this.#slack, this.#job.pr, channels);
 	}
 
-	// React to as many matches as the per-run cap allows, keeping prMatches
-	// in sync per iteration so a mid-loop throw doesn't lose discovered work
-	// or leave a terminal PR's entry stranded.
+	// React to as many matches as the per-run cap allows; the rest roll
+	// over via the cache.
 	async #applyReactions(matches) {
 		const prKey = this.#job.prKey;
 		const toReact = matches.slice(0, REACTIONS_PER_RUN_CAP);
@@ -482,8 +481,9 @@ export class Reactor {
 			);
 		}
 
-		// Persist the full set up-front so an early throw still leaves the
-		// discovered matches in cache for the next run to retry.
+		// Persist the full set up-front so a throw mid-loop still leaves the
+		// discovered matches in cache for the next run; keep it in sync as
+		// stale matches drop out.
 		let surviving = [...matches];
 		this.#prMatches.set(prKey, surviving);
 
@@ -495,6 +495,8 @@ export class Reactor {
 			}
 		}
 
+		// Terminal events (closed/merged) are the last in the PR's lifecycle;
+		// drop the entry rather than wait for the 90-day sweep.
 		if (this.#job.closesPR || !surviving.length) {
 			this.#prMatches.delete(prKey);
 		}
