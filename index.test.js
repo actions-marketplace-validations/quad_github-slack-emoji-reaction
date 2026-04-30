@@ -12,7 +12,7 @@ import {
 	Memo,
 	matchesPullUrl,
 	prContext,
-	reactToMatch,
+	Reactor,
 	SlackClient,
 	tokenizeAngles,
 	urlsFromMessage,
@@ -252,14 +252,15 @@ const slackFor = (scripts) => {
 	return { slack, calls };
 };
 
-const reactArgs = ({ slack, job = {}, botUserId = null }) => {
+const makeReactor = ({ slack, job = {}, botUserId = null }) => {
 	const memo = new Memo();
 	if (botUserId) memo.set("botUserId", botUserId);
-	return [
+	return new Reactor({
 		slack,
 		memo,
-		{ addEmoji: "eyes", removeEmoji: "", isRerun: false, ...job },
-	];
+		prMatches: new Memo(),
+		job: { addEmoji: "eyes", removeEmoji: "", isRerun: false, ...job },
+	});
 };
 
 // ---------------------------------------------------------------- slackCall
@@ -523,14 +524,11 @@ test("reactToMatch: approved with our bot owning a stale changes-requested remov
 		"reactions.remove": [{ body: { ok: true } }],
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	const result = await reactToMatch(
-		...reactArgs({
-			slack,
-			job: { addEmoji: "white_check_mark", removeEmoji: "warning" },
-			botUserId: "U0BOT",
-		}),
-		{ channel: "C1", ts: "1.0" },
-	);
+	const result = await makeReactor({
+		slack,
+		job: { addEmoji: "white_check_mark", removeEmoji: "warning" },
+		botUserId: "U0BOT",
+	}).reactToMatch({ channel: "C1", ts: "1.0" });
 	assert.equal(result.ok, true);
 	assert.deepEqual(
 		calls.map((c) => c.method),
@@ -552,14 +550,11 @@ test("reactToMatch: approved without our bot in the warning users array does NOT
 		],
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	await reactToMatch(
-		...reactArgs({
-			slack,
-			job: { addEmoji: "white_check_mark", removeEmoji: "warning" },
-			botUserId: "U0BOT",
-		}),
-		{ channel: "C1", ts: "1.0" },
-	);
+	await makeReactor({
+		slack,
+		job: { addEmoji: "white_check_mark", removeEmoji: "warning" },
+		botUserId: "U0BOT",
+	}).reactToMatch({ channel: "C1", ts: "1.0" });
 	// No reactions.remove call.
 	assert.deepEqual(
 		calls.map((c) => c.method),
@@ -571,18 +566,15 @@ test("reactToMatch: when isRerun=true, skips the entire flip-cleanup branch (re-
 	const { slack, calls } = slackFor({
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	await reactToMatch(
-		...reactArgs({
-			slack,
-			job: {
-				addEmoji: "white_check_mark",
-				removeEmoji: "warning",
-				isRerun: true,
-			},
-			botUserId: "U0BOT",
-		}),
-		{ channel: "C1", ts: "1.0" },
-	);
+	await makeReactor({
+		slack,
+		job: {
+			addEmoji: "white_check_mark",
+			removeEmoji: "warning",
+			isRerun: true,
+		},
+		botUserId: "U0BOT",
+	}).reactToMatch({ channel: "C1", ts: "1.0" });
 	// No reactions.get, no reactions.remove. Just the additive add.
 	assert.deepEqual(
 		calls.map((c) => c.method),
@@ -595,10 +587,10 @@ test("reactToMatch: tolerated reaction errors (already_reacted) do not throw", a
 		"reactions.add": [{ body: { ok: false, error: "already_reacted" } }],
 	});
 	// No removeEmoji passed so flip cleanup is skipped.
-	const result = await reactToMatch(
-		...reactArgs({ slack, job: { addEmoji: "large_purple_square" } }),
-		{ channel: "C1", ts: "1.0" },
-	);
+	const result = await makeReactor({
+		slack,
+		job: { addEmoji: "large_purple_square" },
+	}).reactToMatch({ channel: "C1", ts: "1.0" });
 	assert.equal(result.error, "already_reacted");
 });
 
@@ -606,10 +598,10 @@ test("reactToMatch: stale-match errors (channel_not_found) surface so caller can
 	const { slack } = slackFor({
 		"reactions.add": [{ body: { ok: false, error: "channel_not_found" } }],
 	});
-	const result = await reactToMatch(
-		...reactArgs({ slack, job: { addEmoji: "large_purple_square" } }),
-		{ channel: "C1", ts: "1.0" },
-	);
+	const result = await makeReactor({
+		slack,
+		job: { addEmoji: "large_purple_square" },
+	}).reactToMatch({ channel: "C1", ts: "1.0" });
 	assert.equal(result.error, "channel_not_found");
 });
 
@@ -618,7 +610,7 @@ test("reactToMatch: invalid_auth on reactions.add propagates as AuthError", asyn
 		"reactions.add": [{ body: { ok: false, error: "invalid_auth" } }],
 	});
 	await assert.rejects(
-		reactToMatch(...reactArgs({ slack }), { channel: "C1", ts: "1.0" }),
+		makeReactor({ slack }).reactToMatch({ channel: "C1", ts: "1.0" }),
 		(e) => e instanceof AuthError && e.code === "invalid_auth",
 	);
 });

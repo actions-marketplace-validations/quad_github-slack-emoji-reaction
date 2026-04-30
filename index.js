@@ -476,53 +476,114 @@ export async function discoverMatches(slack, pr, channels) {
 	return matches;
 }
 
-// approved↔changes-requested is the only flippable pair. Remove the
-// opposite emoji only if our own bot put it there. Skipped on re-runs
-// so a stale replay can't reverse a real later state.
 function warnIfUntolerated(prefix, res) {
 	if (!res.ok && !TOLERATED_REACTION_ERRORS.has(res.error)) {
 		console.warn(`${prefix}: ${res.error}`);
 	}
 }
 
-async function flipCleanup(slack, memo, job, match) {
-	if (job.isRerun || !job.removeEmoji) return;
+// One run's worth of reaction work, parameterized by the four deps that
+// otherwise thread through every step. Methods compose discover → react
+// → cache-update without re-passing the bundle.
+export class Reactor {
+	#slack;
+	#memo;
+	#prMatches;
+	#job;
 
-	const where = `${match.channel}/${match.ts}`;
-	const got = await slack.call("reactions.get", {
-		channel: match.channel,
-		timestamp: match.ts,
-		full: true,
-	});
-	if (!got.ok) {
-		warnIfUntolerated(`reactions.get ${where}`, got);
-		return;
+	constructor({ slack, memo, prMatches, job }) {
+		this.#slack = slack;
+		this.#memo = memo;
+		this.#prMatches = prMatches;
+		this.#job = job;
 	}
-	const opp = got.message?.reactions?.find((r) => r.name === job.removeEmoji);
-	if (!opp) return;
-	const botUserId = await memo.ensure("botUserId", BOT_USER_ID_TTL_S, () =>
-		fetchBotUserId(slack),
-	);
-	if (!opp.users.includes(botUserId)) return;
 
-	const rm = await slack.call("reactions.remove", {
-		channel: match.channel,
-		timestamp: match.ts,
-		name: job.removeEmoji,
-	});
-	warnIfUntolerated(`reactions.remove ${where} ${job.removeEmoji}`, rm);
-}
+	async findMatches() {
+		const cached = this.#prMatches.get(this.#job.prKey);
+		if (cached?.length) return cached;
+		const channels = await this.#memo.ensure(
+			"channels",
+			CHANNEL_LIST_TTL_S,
+			() => fetchChannels(this.#slack),
+		);
+		return discoverMatches(this.#slack, this.#job.pr, channels);
+	}
 
-export async function reactToMatch(slack, memo, job, match) {
-	const where = `${match.channel}/${match.ts}`;
-	await flipCleanup(slack, memo, job, match);
-	const add = await slack.call("reactions.add", {
-		channel: match.channel,
-		timestamp: match.ts,
-		name: job.addEmoji,
-	});
-	warnIfUntolerated(`reactions.add ${where} ${job.addEmoji}`, add);
-	return { ok: !!add.ok, error: add.error };
+	// React to as many matches as the per-run cap allows, keeping prMatches
+	// in sync per iteration so a mid-loop throw doesn't lose discovered work
+	// or leave a terminal PR's entry stranded.
+	async applyReactions(matches) {
+		const job = this.#job;
+		const prMatches = this.#prMatches;
+		const toReact = matches.slice(0, REACTIONS_PER_RUN_CAP);
+		if (matches.length > REACTIONS_PER_RUN_CAP) {
+			console.warn(
+				`reactions-per-run cap (${REACTIONS_PER_RUN_CAP}) reached; ${matches.length - REACTIONS_PER_RUN_CAP} kept in cache for next run`,
+			);
+		}
+
+		// Persist the full set up-front so an early throw still leaves the
+		// discovered matches in cache for the next run to retry.
+		let surviving = [...matches];
+		prMatches.set(job.prKey, surviving);
+
+		for (const m of toReact) {
+			const result = await this.reactToMatch(m);
+			if (STALE_MATCH_ERRORS.has(result.error)) {
+				surviving = surviving.filter((x) => x !== m);
+				prMatches.set(job.prKey, surviving);
+			}
+		}
+
+		if (job.isTerminal || !surviving.length) prMatches.delete(job.prKey);
+	}
+
+	async reactToMatch(match) {
+		const where = `${match.channel}/${match.ts}`;
+		await this.#flipCleanup(match);
+		const add = await this.#slack.call("reactions.add", {
+			channel: match.channel,
+			timestamp: match.ts,
+			name: this.#job.addEmoji,
+		});
+		warnIfUntolerated(`reactions.add ${where} ${this.#job.addEmoji}`, add);
+		return { ok: !!add.ok, error: add.error };
+	}
+
+	// approved↔changes-requested is the only flippable pair. Remove the
+	// opposite emoji only if our own bot put it there. Skipped on re-runs
+	// so a stale replay can't reverse a real later state.
+	async #flipCleanup(match) {
+		const job = this.#job;
+		const slack = this.#slack;
+		if (job.isRerun || !job.removeEmoji) return;
+
+		const where = `${match.channel}/${match.ts}`;
+		const got = await slack.call("reactions.get", {
+			channel: match.channel,
+			timestamp: match.ts,
+			full: true,
+		});
+		if (!got.ok) {
+			warnIfUntolerated(`reactions.get ${where}`, got);
+			return;
+		}
+		const opp = got.message?.reactions?.find((r) => r.name === job.removeEmoji);
+		if (!opp) return;
+		const botUserId = await this.#memo.ensure(
+			"botUserId",
+			BOT_USER_ID_TTL_S,
+			() => fetchBotUserId(slack),
+		);
+		if (!opp.users.includes(botUserId)) return;
+
+		const rm = await slack.call("reactions.remove", {
+			channel: match.channel,
+			timestamp: match.ts,
+			name: job.removeEmoji,
+		});
+		warnIfUntolerated(`reactions.remove ${where} ${job.removeEmoji}`, rm);
+	}
 }
 
 // Read env + payload into a job spec. Throws FatalError on operator-fixable
@@ -569,44 +630,6 @@ function readJob() {
 	};
 }
 
-async function findMatches(slack, memo, prMatches, job) {
-	const cached = prMatches.get(job.prKey);
-	if (cached?.length) return cached;
-	const channels = await memo.ensure("channels", CHANNEL_LIST_TTL_S, () =>
-		fetchChannels(slack),
-	);
-	return discoverMatches(slack, job.pr, channels);
-}
-
-// React to as many matches as the per-run cap allows, keeping prMatches
-// in sync per iteration so a mid-loop throw doesn't lose discovered work
-// or leave a terminal PR's entry stranded.
-async function applyReactions(slack, memo, prMatches, job, matches) {
-	const toReact = matches.slice(0, REACTIONS_PER_RUN_CAP);
-	if (matches.length > REACTIONS_PER_RUN_CAP) {
-		console.warn(
-			`reactions-per-run cap (${REACTIONS_PER_RUN_CAP}) reached; ${matches.length - REACTIONS_PER_RUN_CAP} kept in cache for next run`,
-		);
-	}
-
-	// Persist the full set up-front so an early throw still leaves the
-	// discovered matches in cache for the next run to retry.
-	let surviving = [...matches];
-	prMatches.set(job.prKey, surviving);
-
-	for (const m of toReact) {
-		const result = await reactToMatch(slack, memo, job, m);
-		if (STALE_MATCH_ERRORS.has(result.error)) {
-			surviving = surviving.filter((x) => x !== m);
-			prMatches.set(job.prKey, surviving);
-		}
-	}
-
-	// Clean completion: terminal events drop the entry entirely; non-terminal
-	// runs that left nothing surviving also drop (next event re-discovers).
-	if (job.isTerminal || !surviving.length) prMatches.delete(job.prKey);
-}
-
 async function main() {
 	const job = readJob();
 	if (!job) return;
@@ -624,8 +647,8 @@ async function main() {
 	// progress (memoized I/O, surviving matches) is never lost to a throw.
 	try {
 		prMatches.sweepStale(nowS() - PR_STALE_TTL_S);
-		const matches = await findMatches(slack, memo, prMatches, job);
-		await applyReactions(slack, memo, prMatches, job, matches);
+		const reactor = new Reactor({ slack, memo, prMatches, job });
+		await reactor.applyReactions(await reactor.findMatches());
 	} finally {
 		const evicted = prMatches.capByLru(MAX_PR_ENTRIES);
 		if (evicted) console.warn(`pr-entries safety cap; evicted ${evicted}`);
