@@ -6,7 +6,7 @@ import { FatalError } from "./errors.js";
 // message + cause chain.
 class NetworkError extends FatalError {
 	constructor(method, cause) {
-		super(`Slack ${method} failed: ${cause.message}`, { cause });
+		super(`Slack ${method} failed`, { cause });
 	}
 }
 

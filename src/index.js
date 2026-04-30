@@ -329,7 +329,11 @@ if (import.meta.main) {
 		await main();
 	} catch (e) {
 		if (!(e instanceof FatalError)) throw e;
-		console.error(e.message);
+		// Walk the cause chain so deep errors surface in the one-line exit
+		// message without dragging in the stack traces console.error(e) prints.
+		const parts = [];
+		for (let cur = e; cur; cur = cur.cause) parts.push(cur.message);
+		console.error(parts.join(": "));
 		process.exit(1);
 	}
 }
