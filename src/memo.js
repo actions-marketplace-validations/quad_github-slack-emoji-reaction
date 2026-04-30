@@ -21,7 +21,7 @@ export class Memo {
 
 	// Returns the cached value if its age is under `ttlS`; otherwise runs
 	// `fetcher`, writes the result back, and returns it.
-	async computeIfAbsent(key, ttlS, fetcher) {
+	async getOrSet(key, ttlS, fetcher) {
 		const cell = this.#cells[key];
 		if (cell && nowS() - cell.refreshedAt < ttlS) return cell.value;
 		const value = await fetcher();

@@ -1,5 +1,6 @@
 import { retry } from "./async.js";
 import { FatalError } from "./errors.js";
+import * as log from "./log.js";
 
 class NetworkError extends FatalError {
 	constructor(method, cause) {
@@ -28,16 +29,23 @@ export class SlackClient {
 	]);
 
 	#token;
-	#fetch;
 	#signal;
 
-	constructor({ token, fetch, signal }) {
+	constructor(token, signal) {
 		this.#token = token;
-		this.#fetch = fetch;
 		this.#signal = signal;
 	}
 
-	async call(method, params) {
+	async call(
+		method,
+		{ params = {}, ignoreErrors = [], mustSucceed = false } = {},
+	) {
+		const body = await this.#request(method, params);
+		SlackClient.#handleError(method, body, ignoreErrors, mustSucceed);
+		return body;
+	}
+
+	async #request(method, params) {
 		try {
 			return await retry(() => this.#callOnce(method, params), {
 				maxAttempts: SlackClient.#MAX_ATTEMPTS,
@@ -69,8 +77,14 @@ export class SlackClient {
 		return body;
 	}
 
+	static #handleError(method, body, ignoreErrors, mustSucceed) {
+		if (body.ok || ignoreErrors.includes(body.error)) return;
+		if (mustSucceed) throw FatalError.fromSlack(method, body);
+		log.warn(`Slack ${method} unexpected error: ${body.error}`);
+	}
+
 	#sendRequest(method, params) {
-		return this.#fetch(new URL(method, SlackClient.#SLACK_API), {
+		return fetch(new URL(method, SlackClient.#SLACK_API), {
 			method: "POST",
 			headers: {
 				Authorization: `Bearer ${this.#token}`,
@@ -103,12 +117,16 @@ export class SlackClient {
 		}
 	}
 
-	async *paginate(method, baseParams, maxPages) {
+	async *paginate(
+		method,
+		{ params = {}, ignoreErrors = [], mustSucceed = false, maxPages },
+	) {
 		let cursor;
 		for (let page = 0; page < maxPages; page++) {
 			const res = await this.call(method, {
-				...baseParams,
-				...(cursor && { cursor }),
+				params: { ...params, ...(cursor && { cursor }) },
+				ignoreErrors,
+				mustSucceed,
 			});
 			yield res;
 			if (!res.ok) return;

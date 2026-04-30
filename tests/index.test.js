@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-
 import { CacheClient } from "../src/cache.js";
 import { FatalError } from "../src/errors.js";
-import { deriveStatus, prContext, Reactor } from "../src/index.js";
 import { Memo } from "../src/memo.js";
+import { applyReactions } from "../src/pipeline/apply-reactions.js";
+import { findMatches } from "../src/pipeline/find-matches.js";
+import { deriveStatus, prContext } from "../src/pipeline/job.js";
 import { SlackClient } from "../src/slack.js";
 
 // ============================================================ static helpers
@@ -158,21 +159,18 @@ function shimFetch(scripts) {
 	return { impl, calls };
 }
 
-// Each test builds its own slack client over a scripted fetch shim — no
-// shared module state to reset between tests.
-const slackFor = (scripts) => {
+// Each test installs its own fetch shim via t.mock.method, which restores
+// globalThis.fetch automatically at test end — no manual cleanup needed.
+const slackFor = (t, scripts) => {
 	const { impl, calls } = shimFetch(scripts);
-	const slack = new SlackClient({
-		token: "xoxb",
-		fetch: impl,
-		signal: new AbortController().signal,
-	});
+	t.mock.method(globalThis, "fetch", impl);
+	const slack = new SlackClient("xoxb", new AbortController().signal);
 	return { slack, calls };
 };
 
-// Build a Reactor for run() tests. By default seeds a cached match so run()
-// skips discovery — callers exercising the discovery path pass `cached: null`.
-// Returns the prMatches handle so tests can observe retain/prune outcomes.
+// Wires up findMatches+applyReactions for run() tests. By default seeds a
+// cached match so the run skips discovery — callers exercising the discovery
+// path pass `cached: null`. Returns prMatches so tests can observe outcomes.
 const setupReactor = ({
 	slack,
 	job = {},
@@ -184,35 +182,36 @@ const setupReactor = ({
 	const prKey = "octo/hello#42";
 	const prMatches = new Memo({});
 	if (cached) prMatches.set(prKey, cached);
-	const reactor = new Reactor({
-		slack,
-		memo,
-		prMatches,
-		job: {
-			addEmoji: "eyes",
-			removeEmoji: "",
-			isRerun: false,
-			closesPR: false,
-			prKey,
-			pr: { owner: "octo", repo: "hello", num: 42 },
-			...job,
+	const fullJob = {
+		emoji: "eyes",
+		opposite: "",
+		isRerun: false,
+		closesPR: false,
+		prKey,
+		pr: { owner: "octo", repo: "hello", num: 42 },
+		...job,
+	};
+	const reactor = {
+		run: async () => {
+			const matches = await findMatches(slack, memo, prMatches, fullJob);
+			await applyReactions(slack, memo, prMatches, fullJob, matches);
 		},
-	});
+	};
 	return { reactor, prMatches, prKey };
 };
 
 // ---------------------------------------------------------------- SlackClient.call
 
-test("slack.call: returns body verbatim on success", async () => {
-	const { slack } = slackFor({
+test("slack.call: returns body verbatim on success", async (t) => {
+	const { slack } = slackFor(t, {
 		"auth.test": [{ body: { ok: true, user_id: "U0BOT" } }],
 	});
-	const res = await slack.call("auth.test", {});
+	const res = await slack.call("auth.test");
 	assert.deepEqual(res, { ok: true, user_id: "U0BOT" });
 });
 
-test("slack.call: 429 with Retry-After triggers a sleep+retry, then succeeds", async () => {
-	const { slack, calls } = slackFor({
+test("slack.call: 429 with Retry-After triggers a sleep+retry, then succeeds", async (t) => {
+	const { slack, calls } = slackFor(t, {
 		"auth.test": [
 			{
 				status: 429,
@@ -223,7 +222,7 @@ test("slack.call: 429 with Retry-After triggers a sleep+retry, then succeeds", a
 		],
 	});
 	const t0 = Date.now();
-	const res = await slack.call("auth.test", {});
+	const res = await slack.call("auth.test");
 	const elapsed = Date.now() - t0;
 	assert.equal(res.ok, true);
 	assert.equal(calls.length, 2);
@@ -233,8 +232,8 @@ test("slack.call: 429 with Retry-After triggers a sleep+retry, then succeeds", a
 	);
 });
 
-test("slack.call: 200 + ok:false + error=ratelimited is treated as rate-limit (Slack quirk)", async () => {
-	const { slack, calls } = slackFor({
+test("slack.call: 200 + ok:false + error=ratelimited is treated as rate-limit (Slack quirk)", async (t) => {
+	const { slack, calls } = slackFor(t, {
 		"conversations.history": [
 			{
 				status: 200,
@@ -244,52 +243,54 @@ test("slack.call: 200 + ok:false + error=ratelimited is treated as rate-limit (S
 			{ body: { ok: true, messages: [] } },
 		],
 	});
-	const res = await slack.call("conversations.history", { channel: "C1" });
+	const res = await slack.call("conversations.history", {
+		params: { channel: "C1" },
+	});
 	assert.equal(res.ok, true);
 	assert.equal(calls.length, 2);
 });
 
-test("slack.call: gives up after 2 retries and returns the last 429 body", async () => {
+test("slack.call: gives up after 2 retries and returns the last 429 body", async (t) => {
 	const ratelimited = {
 		status: 429,
 		headers: { "retry-after": "1" },
 		body: { ok: false, error: "ratelimited" },
 	};
-	const { slack, calls } = slackFor({
+	const { slack, calls } = slackFor(t, {
 		"auth.test": [ratelimited, ratelimited, ratelimited],
 	});
-	const res = await slack.call("auth.test", {});
+	const res = await slack.call("auth.test");
 	assert.equal(res.ok, false);
 	assert.equal(res.error, "ratelimited");
 	assert.equal(calls.length, 3);
 });
 
-test("slack.call: invalid_auth response is thrown as FatalError", async () => {
-	const { slack } = slackFor({
+test("slack.call: invalid_auth response is thrown as FatalError", async (t) => {
+	const { slack } = slackFor(t, {
 		"auth.test": [{ body: { ok: false, error: "invalid_auth" } }],
 	});
 	await assert.rejects(
-		slack.call("auth.test", {}),
+		slack.call("auth.test"),
 		(e) => e instanceof FatalError && /invalid_auth/.test(e.message),
 	);
 });
 
 // ---------------------------------------------------------------- Memo
 
-test("Memo.computeIfAbsent: caches first call, skips fetcher on subsequent calls within TTL", async () => {
+test("Memo.getOrSet: caches first call, skips fetcher on subsequent calls within TTL", async () => {
 	const memo = new Memo({});
 	let calls = 0;
 	const fetcher = async () => ++calls;
-	assert.equal(await memo.computeIfAbsent("k", 60, fetcher), 1);
-	assert.equal(await memo.computeIfAbsent("k", 60, fetcher), 1);
+	assert.equal(await memo.getOrSet("k", 60, fetcher), 1);
+	assert.equal(await memo.getOrSet("k", 60, fetcher), 1);
 	assert.equal(calls, 1);
 });
 
-test("Memo.computeIfAbsent: refetches once the cell's age exceeds the TTL", async () => {
+test("Memo.getOrSet: refetches once the cell's age exceeds the TTL", async () => {
 	// Seed a stale cell (refreshedAt 1h ago, TTL 60s).
 	const stale = Math.floor(Date.now() / 1000) - 3600;
 	const memo = new Memo({ k: { value: "old", refreshedAt: stale } });
-	const result = await memo.computeIfAbsent("k", 60, async () => "fresh");
+	const result = await memo.getOrSet("k", 60, async () => "fresh");
 	assert.equal(result, "fresh");
 });
 
@@ -346,10 +347,10 @@ test("CacheClient: warns when cache is unavailable inside GHA (misconfig)", asyn
 	}
 });
 
-// ---------------------------------------------------------------- Reactor.run (flip cleanup, with cached match)
+// ---------------------------------------------------------------- Reactor.run (withdraw opposite, with cached match)
 
-test("Reactor.run: approved with our bot owning a stale changes-requested removes the warning, then adds approved", async () => {
-	const { slack, calls } = slackFor({
+test("Reactor.run: approved with our bot owning a stale changes-requested removes the warning, then adds approved", async (t) => {
+	const { slack, calls } = slackFor(t, {
 		"reactions.get": [
 			{
 				body: {
@@ -367,7 +368,7 @@ test("Reactor.run: approved with our bot owning a stale changes-requested remove
 	});
 	const { reactor } = setupReactor({
 		slack,
-		job: { addEmoji: "white_check_mark", removeEmoji: "warning" },
+		job: { emoji: "white_check_mark", opposite: "warning" },
 		botUserId: "U0BOT",
 	});
 	await reactor.run();
@@ -377,8 +378,8 @@ test("Reactor.run: approved with our bot owning a stale changes-requested remove
 	);
 });
 
-test("Reactor.run: approved without our bot in the warning users array does NOT remove someone else’s warning", async () => {
-	const { slack, calls } = slackFor({
+test("Reactor.run: approved without our bot in the warning users array does NOT remove someone else’s warning", async (t) => {
+	const { slack, calls } = slackFor(t, {
 		"reactions.get": [
 			{
 				body: {
@@ -393,7 +394,7 @@ test("Reactor.run: approved without our bot in the warning users array does NOT 
 	});
 	const { reactor } = setupReactor({
 		slack,
-		job: { addEmoji: "white_check_mark", removeEmoji: "warning" },
+		job: { emoji: "white_check_mark", opposite: "warning" },
 		botUserId: "U0BOT",
 	});
 	await reactor.run();
@@ -403,15 +404,15 @@ test("Reactor.run: approved without our bot in the warning users array does NOT 
 	);
 });
 
-test("Reactor.run: when isRerun=true, skips the entire flip-cleanup branch (re-run safety)", async () => {
-	const { slack, calls } = slackFor({
+test("Reactor.run: when isRerun=true, skips the entire withdraw-opposite branch (re-run safety)", async (t) => {
+	const { slack, calls } = slackFor(t, {
 		"reactions.add": [{ body: { ok: true } }],
 	});
 	const { reactor } = setupReactor({
 		slack,
 		job: {
-			addEmoji: "white_check_mark",
-			removeEmoji: "warning",
+			emoji: "white_check_mark",
+			opposite: "warning",
 			isRerun: true,
 		},
 		botUserId: "U0BOT",
@@ -423,32 +424,54 @@ test("Reactor.run: when isRerun=true, skips the entire flip-cleanup branch (re-r
 	);
 });
 
-test("Reactor.run: tolerated reaction errors (already_reacted) keep the match in cache", async () => {
-	const { slack } = slackFor({
+test("Reactor.run: tolerated reaction errors (already_reacted) keep the match in cache", async (t) => {
+	const { slack } = slackFor(t, {
 		"reactions.add": [{ body: { ok: false, error: "already_reacted" } }],
 	});
 	const { reactor, prMatches, prKey } = setupReactor({
 		slack,
-		job: { addEmoji: "large_purple_square" },
+		job: { emoji: "large_purple_square" },
 	});
 	await reactor.run();
 	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "1.0" }]);
 });
 
-test("Reactor.run: stale-match errors (channel_not_found) prune the entry from cache", async () => {
-	const { slack } = slackFor({
+test("Reactor.run: stale-match errors (channel_not_found) prune the entry from cache", async (t) => {
+	const { slack } = slackFor(t, {
 		"reactions.add": [{ body: { ok: false, error: "channel_not_found" } }],
 	});
 	const { reactor, prMatches, prKey } = setupReactor({
 		slack,
-		job: { addEmoji: "large_purple_square" },
+		job: { emoji: "large_purple_square" },
 	});
 	await reactor.run();
 	assert.equal(prMatches.get(prKey), undefined);
 });
 
-test("Reactor.run: invalid_auth on reactions.add propagates as FatalError", async () => {
-	const { slack } = slackFor({
+test("Reactor.run: stale prune is persisted incrementally, surviving a later throw", async (t) => {
+	// Two cached matches. First is stale (prune); second throws mid-loop.
+	// Without incremental persist, the prune would be lost when the throw
+	// short-circuits the final write.
+	const { slack } = slackFor(t, {
+		"reactions.add": [
+			{ body: { ok: false, error: "channel_not_found" } },
+			{ body: { ok: false, error: "invalid_auth" } },
+		],
+	});
+	const { reactor, prMatches, prKey } = setupReactor({
+		slack,
+		job: { emoji: "eyes" },
+		cached: [
+			{ channel: "C1", ts: "1.0" },
+			{ channel: "C2", ts: "2.0" },
+		],
+	});
+	await assert.rejects(reactor.run(), (e) => e instanceof FatalError);
+	assert.deepEqual(prMatches.get(prKey), [{ channel: "C2", ts: "2.0" }]);
+});
+
+test("Reactor.run: invalid_auth on reactions.add propagates as FatalError", async (t) => {
+	const { slack } = slackFor(t, {
 		"reactions.add": [{ body: { ok: false, error: "invalid_auth" } }],
 	});
 	const { reactor } = setupReactor({ slack });
@@ -460,12 +483,12 @@ test("Reactor.run: invalid_auth on reactions.add propagates as FatalError", asyn
 
 // ---------------------------------------------------------------- Reactor.run (discovery, no cached match)
 
-test("Reactor.run: with no cached match, paginates channels.list (filtered to is_member) and scans history", async () => {
+test("Reactor.run: with no cached match, paginates channels.list (filtered to is_member) and scans history", async (t) => {
 	const matchingMsg = {
 		ts: "1.001",
 		text: "see <https://github.com/octo/hello/pull/42>",
 	};
-	const { slack, calls } = slackFor({
+	const { slack, calls } = slackFor(t, {
 		"conversations.list": [
 			{
 				body: {
@@ -493,7 +516,7 @@ test("Reactor.run: with no cached match, paginates channels.list (filtered to is
 	});
 	const { reactor, prMatches, prKey } = setupReactor({
 		slack,
-		job: { addEmoji: "x" },
+		job: { emoji: "x" },
 		cached: null,
 	});
 	await reactor.run();
@@ -517,8 +540,8 @@ test("Reactor.run: with no cached match, paginates channels.list (filtered to is
 	);
 });
 
-test("Reactor.run: discovery rejects /pull/123 ↔ /pull/1234 substring trap", async () => {
-	const { slack } = slackFor({
+test("Reactor.run: discovery rejects /pull/123 ↔ /pull/1234 substring trap", async (t) => {
+	const { slack } = slackFor(t, {
 		"conversations.list": [
 			{
 				body: {
@@ -545,7 +568,7 @@ test("Reactor.run: discovery rejects /pull/123 ↔ /pull/1234 substring trap", a
 	});
 	const { reactor, prMatches, prKey } = setupReactor({
 		slack,
-		job: { addEmoji: "x" },
+		job: { emoji: "x" },
 		cached: null,
 	});
 	await reactor.run();
@@ -554,7 +577,7 @@ test("Reactor.run: discovery rejects /pull/123 ↔ /pull/1234 substring trap", a
 	assert.equal(prMatches.get(prKey), undefined);
 });
 
-test("Reactor.run: discovery extracts PR URL from message blocks (not just text)", async () => {
+test("Reactor.run: discovery extracts PR URL from message blocks (not just text)", async (t) => {
 	const msgWithBlocks = {
 		ts: "1.5",
 		blocks: [
@@ -571,7 +594,7 @@ test("Reactor.run: discovery extracts PR URL from message blocks (not just text)
 			},
 		],
 	};
-	const { slack } = slackFor({
+	const { slack } = slackFor(t, {
 		"conversations.list": [
 			{
 				body: {
@@ -588,7 +611,7 @@ test("Reactor.run: discovery extracts PR URL from message blocks (not just text)
 	});
 	const { reactor, prMatches, prKey } = setupReactor({
 		slack,
-		job: { addEmoji: "x" },
+		job: { emoji: "x" },
 		cached: null,
 	});
 	await reactor.run();
