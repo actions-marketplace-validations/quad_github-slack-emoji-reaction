@@ -10,8 +10,9 @@ import test from "node:test";
 // and exits 1. That round-trip is the wiring this test guards.
 
 test("spawn: pull_request closed reaches auth and exits with AuthError", () => {
-	const r = spawnSync(process.execPath, ["index.js"], {
-		cwd: import.meta.dirname,
+	const repoRoot = `${import.meta.dirname}/..`;
+	const r = spawnSync(process.execPath, ["src/index.js"], {
+		cwd: repoRoot,
 		encoding: "utf8",
 		env: {
 			...process.env,

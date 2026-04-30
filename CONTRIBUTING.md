@@ -25,9 +25,10 @@ top-level catch, FatalError → exit 1, INPUT_* env reading.
 
 ## Fixtures
 
-Webhook payloads under `fixtures/upstream/` are vendored verbatim from
-[`octokit/webhooks`](https://github.com/octokit/webhooks) at a pinned
-commit. See `fixtures/SOURCE.md` for the pin and refresh recipe.
+Webhook payloads under `tests/fixtures/upstream/` are vendored verbatim
+from [`octokit/webhooks`](https://github.com/octokit/webhooks) at a
+pinned commit. See `tests/fixtures/SOURCE.md` for the pin and refresh
+recipe.
 
 ## Code shape
 

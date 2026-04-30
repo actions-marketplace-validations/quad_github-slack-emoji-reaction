@@ -3,14 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-import {
-	deriveStatus,
-	FatalError,
-	Memo,
-	prContext,
-	Reactor,
-	SlackClient,
-} from "./index.js";
+import { FatalError } from "../src/errors.js";
+import { deriveStatus, prContext, Reactor } from "../src/index.js";
+import { Memo } from "../src/memo.js";
+import { SlackClient } from "../src/slack.js";
 
 // ============================================================ static helpers
 
