@@ -31,6 +31,7 @@ const HISTORY_PAGES_PER_CHANNEL = 3;
 const HISTORY_LOOKBACK_S = 30 * 24 * 3600;
 const REACTIONS_PER_RUN_CAP = 50;
 const MAX_PR_ENTRIES = 10000;
+const RUN_DEADLINE_MS = 5 * 60 * 1000;
 
 // GHA preserves hyphens in INPUT_* env vars (only spaces become underscores).
 const input = (name) =>
@@ -294,7 +295,12 @@ async function main() {
 	if (!job) return;
 	console.log(`::add-mask::${job.token}`);
 
-	const slack = new SlackClient({ token: job.token });
+	// Run-level deadline. Defense-in-depth against a stuck workflow: if any
+	// path through the reactor blocks past the deadline, the signal aborts
+	// in-flight fetches + sleeps and the throw lands in our finally block,
+	// which still saves whatever progress made it into memo/prMatches.
+	const deadline = AbortSignal.timeout(RUN_DEADLINE_MS);
+	const slack = new SlackClient({ token: job.token, signal: deadline });
 	const cache = new CacheClient();
 	const restored = (await cache.restore()) ?? {};
 	const memo = new Memo(restored.memo);

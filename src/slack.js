@@ -1,6 +1,19 @@
 import { FatalError } from "./errors.js";
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// AbortSignal-aware sleep. Rejects with the signal's reason on abort.
+const sleep = (ms, signal) =>
+	new Promise((resolve, reject) => {
+		if (signal?.aborted) return reject(signal.reason);
+		const timer = setTimeout(resolve, ms);
+		signal?.addEventListener(
+			"abort",
+			() => {
+				clearTimeout(timer);
+				reject(signal.reason);
+			},
+			{ once: true },
+		);
+	});
 
 export class SlackClient {
 	static #SLACK_API = "https://slack.com/api/";
@@ -16,6 +29,7 @@ export class SlackClient {
 	#apiBase;
 	#maxRetries;
 	#retryAfterCapS;
+	#signal;
 
 	constructor({
 		token,
@@ -23,12 +37,14 @@ export class SlackClient {
 		apiBase = SlackClient.#SLACK_API,
 		maxRetries = 2,
 		retryAfterCapS = 60,
+		signal,
 	} = {}) {
 		this.#token = token;
 		this.#fetch = fetch;
 		this.#apiBase = apiBase;
 		this.#maxRetries = maxRetries;
 		this.#retryAfterCapS = retryAfterCapS;
+		this.#signal = signal;
 	}
 
 	// Outcome:
@@ -46,8 +62,10 @@ export class SlackClient {
 					"Content-Type": "application/json; charset=utf-8",
 				},
 				body: JSON.stringify(params || {}),
+				signal: this.#signal,
 			});
 		} catch (e) {
+			if (this.#signal?.aborted) throw this.#signal.reason;
 			return {
 				kind: "network",
 				waitMs: 1000,
@@ -78,6 +96,7 @@ export class SlackClient {
 	async call(method, params) {
 		let outcome;
 		for (let attempt = 0; attempt <= this.#maxRetries; attempt++) {
+			this.#signal?.throwIfAborted();
 			outcome = await this.#callOnce(method, params);
 			if (outcome.kind === "ok") return outcome.body;
 			const tag = `slack ${method} ${outcome.kind}`;
@@ -88,7 +107,7 @@ export class SlackClient {
 					: `${tag}; retry-after ${outcome.waitMs / 1000}s ${where}`,
 			);
 			if (attempt >= this.#maxRetries) break;
-			await sleep(outcome.waitMs);
+			await sleep(outcome.waitMs, this.#signal);
 		}
 		return outcome.body;
 	}
