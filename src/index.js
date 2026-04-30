@@ -15,14 +15,6 @@ const FLIP_OPPOSITE = {
 	[STATUS_CHANGES_REQUESTED]: STATUS_APPROVED,
 };
 
-const TOLERATED_REACTION_ERRORS = new Set([
-	"already_reacted",
-	"no_reaction",
-	"not_in_channel",
-	"channel_not_found",
-	"message_not_found",
-]);
-
 // Errors that indicate our cached channel list is stale (bot was removed
 // from the channel, or the channel was archived since we last refreshed).
 // We can't /leave — Slack's already told us we're effectively out — but
@@ -42,20 +34,6 @@ const HISTORY_LOOKBACK_S = 30 * 24 * 3600;
 const REACTIONS_PER_RUN_CAP = 50;
 const MAX_PR_ENTRIES = 10000;
 const RUN_DEADLINE_MS = 5 * 60 * 1000;
-
-// GHA preserves hyphens in INPUT_* env vars (only spaces become underscores).
-const input = (name) =>
-	(process.env[`INPUT_${name.toUpperCase()}`] || "").trim();
-
-function linksToPR(message, pr) {
-	const target = `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.num}`;
-	// JSON.stringify flattens every Slack message shape (text <url>,
-	// attachments, blocks) into a string the URL survives literally; \b
-	// closes the /pull/12 vs /pull/123 substring trap.
-	return new RegExp(`${RegExp.escape(target)}\\b`).test(
-		JSON.stringify(message),
-	);
-}
 
 export function deriveStatus(eventName, payload) {
 	if (eventName === "pull_request_review") {
@@ -112,6 +90,13 @@ async function discoverMatches(slack, memo, pr, channels) {
 			`channels-per-run cap (${MAX_CHANNELS_PER_RUN}) reached; skipped ${channels.length - MAX_CHANNELS_PER_RUN} remaining`,
 		);
 	}
+	// JSON.stringify flattens every Slack message shape (text <url>,
+	// attachments, blocks) into a string the URL survives literally; \b
+	// closes the /pull/12 vs /pull/123 substring trap.
+	const target = `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.num}`;
+	const linkRe = new RegExp(`${RegExp.escape(target)}\\b`);
+	const linksToPR = (msg) => linkRe.test(JSON.stringify(msg));
+
 	const matches = [];
 	const oldest = String(Math.floor(Date.now() / 1000) - HISTORY_LOOKBACK_S);
 	for (const ch of channels.slice(0, MAX_CHANNELS_PER_RUN)) {
@@ -124,7 +109,7 @@ async function discoverMatches(slack, memo, pr, channels) {
 				if (STALE_CHANNEL_ERRORS.has(res.error)) memo.delete("channels");
 				break;
 			}
-			const hit = res.messages.find((msg) => linksToPR(msg, pr));
+			const hit = res.messages.find(linksToPR);
 			if (hit) {
 				matches.push({ channel: ch.id, ts: hit.ts });
 				break;
@@ -132,13 +117,6 @@ async function discoverMatches(slack, memo, pr, channels) {
 		}
 	}
 	return matches;
-}
-
-function warnIfUntoleratedError(res, prefix) {
-	if (!res.ok && !TOLERATED_REACTION_ERRORS.has(res.error)) {
-		console.warn(`${prefix}: ${res.error}`);
-	}
-	return res;
 }
 
 // One run's worth of reaction work; bundles the deps that would otherwise
@@ -149,6 +127,21 @@ export class Reactor {
 		"channel_not_found",
 		"message_not_found",
 	]);
+
+	static #TOLERATED_REACTION_ERRORS = new Set([
+		"already_reacted",
+		"no_reaction",
+		"not_in_channel",
+		"channel_not_found",
+		"message_not_found",
+	]);
+
+	static #warnIfUntolerated(res, prefix) {
+		if (!res.ok && !Reactor.#TOLERATED_REACTION_ERRORS.has(res.error)) {
+			console.warn(`${prefix}: ${res.error}`);
+		}
+		return res;
+	}
 
 	#slack;
 	#memo;
@@ -206,7 +199,7 @@ export class Reactor {
 
 	async #reactToMatch(match) {
 		await this.#flipCleanup(match);
-		return warnIfUntoleratedError(
+		return Reactor.#warnIfUntolerated(
 			await this.#slack.call("reactions.add", {
 				channel: match.channel,
 				timestamp: match.ts,
@@ -223,7 +216,7 @@ export class Reactor {
 		if (this.#job.isRerun || !this.#job.removeEmoji) return;
 
 		const where = `${match.channel}/${match.ts}`;
-		const got = warnIfUntoleratedError(
+		const got = Reactor.#warnIfUntolerated(
 			await this.#slack.call("reactions.get", {
 				channel: match.channel,
 				timestamp: match.ts,
@@ -243,7 +236,7 @@ export class Reactor {
 		);
 		if (!opp.users.includes(botUserId)) return;
 
-		warnIfUntoleratedError(
+		Reactor.#warnIfUntolerated(
 			await this.#slack.call("reactions.remove", {
 				channel: match.channel,
 				timestamp: match.ts,
@@ -255,6 +248,10 @@ export class Reactor {
 }
 
 function readJob() {
+	// GHA preserves hyphens in INPUT_* env vars (only spaces become underscores).
+	const input = (name) =>
+		(process.env[`INPUT_${name.toUpperCase()}`] || "").trim();
+
 	const eventPath = FatalError.notNull(
 		process.env.GITHUB_EVENT_PATH,
 		"GITHUB_EVENT_PATH not set; not running inside GitHub Actions",
@@ -331,10 +328,9 @@ if (import.meta.main) {
 		if (!(e instanceof FatalError)) throw e;
 		// Walk the cause chain so deep errors surface in the one-line exit
 		// message without dragging in the stack traces console.error(e) prints.
-		const causeMessages = function* (cur) {
-			for (; cur; cur = cur.cause) yield cur.message;
-		};
-		console.error([...causeMessages(e)].join(": "));
+		const parts = [];
+		for (let cur = e; cur; cur = cur.cause) parts.push(cur.message);
+		console.error(parts.join(": "));
 		process.exit(1);
 	}
 }
