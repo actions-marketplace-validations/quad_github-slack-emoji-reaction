@@ -11,7 +11,7 @@ npm ci
 
 ```sh
 npm run ci                # biome check + node --test
-npm run format            # biome check --write
+npx biome check --write   # autofix + format
 ```
 
 Unit tests cover the pure helpers (`deriveStatus`, `prContext`,

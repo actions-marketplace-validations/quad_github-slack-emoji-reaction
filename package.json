@@ -6,8 +6,7 @@
 	"type": "module",
 	"main": "index.js",
 	"scripts": {
-		"ci": "biome check && node --test",
-		"format": "biome check --write"
+		"ci": "biome check && node --test"
 	},
 	"engines": {
 		"node": ">=24"
