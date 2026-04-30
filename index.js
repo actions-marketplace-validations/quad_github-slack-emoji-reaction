@@ -42,8 +42,9 @@ const input = (name) =>
 // closes the /pull/12 vs /pull/123 substring trap.
 function linksToPR(message, pr) {
 	const target = `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.num}`;
-	const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	return new RegExp(`${escaped}\\b`).test(JSON.stringify(message));
+	return new RegExp(`${RegExp.escape(target)}\\b`).test(
+		JSON.stringify(message),
+	);
 }
 
 export function deriveStatus(eventName, payload) {
