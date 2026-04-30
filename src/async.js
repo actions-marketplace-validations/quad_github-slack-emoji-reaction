@@ -21,11 +21,10 @@ export function sleepUntil(deadlineMs, signal) {
 // Invoke `fn` up to `maxAttempts`. On a thrown error, ask `isRetryable`;
 // if yes, sleep until `getDeadline(error, attempt)` and try again. `signal`
 // aborts in-flight sleeps and short-circuits before the next attempt.
-// `onRetry` fires after each failure that's about to retry. Throws on
-// exhaustion.
+// Throws on exhaustion.
 export async function retry(
 	fn,
-	{ maxAttempts, signal, isRetryable, getDeadline, onRetry },
+	{ maxAttempts, signal, isRetryable, getDeadline },
 ) {
 	for (let attempt = 0; ; attempt++) {
 		signal.throwIfAborted();
@@ -33,7 +32,6 @@ export async function retry(
 			return await fn();
 		} catch (e) {
 			if (attempt + 1 >= maxAttempts || !isRetryable(e)) throw e;
-			onRetry(e, attempt);
 			await sleepUntil(getDeadline(e, attempt), signal);
 		}
 	}

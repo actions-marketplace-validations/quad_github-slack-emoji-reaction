@@ -54,8 +54,6 @@ export class SlackClient {
 					e instanceof RateLimitError
 						? e.deadlineMs
 						: Date.now() + SlackClient.#networkBackoffMs(),
-				onRetry: (e, attempt) =>
-					console.warn(SlackClient.#retryMessage(method, e, attempt)),
 			});
 		} catch (e) {
 			// Retry exhausted: surface a body so callers read .ok/.error
@@ -124,17 +122,5 @@ export class SlackClient {
 	static #networkBackoffMs() {
 		const base = SlackClient.#NETWORK_RETRY_MS;
 		return base + Math.random() * base;
-	}
-
-	static #retryMessage(method, error, attempt) {
-		const where = `(attempt ${attempt + 1}/${SlackClient.#MAX_RETRIES + 1})`;
-		if (error instanceof RateLimitError) {
-			const secs = Math.max(
-				0,
-				Math.round((error.deadlineMs - Date.now()) / 1000),
-			);
-			return `slack ${method} ratelimited; retry-after ${secs}s ${where}`;
-		}
-		return `slack ${method} network: ${error.cause.message} ${where}`;
 	}
 }
