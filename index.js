@@ -641,13 +641,13 @@ async function main() {
 	const memo = new Memo(restored.memo);
 	const prMatches = new Memo(restored.prMatches);
 
-	// All mutations on memo/prMatches are individually valid (sweepStale,
-	// ensure, set, delete, capByLru each leave the structure consistent),
-	// so persisting in `finally` always writes a valid snapshot — partial
-	// progress (memoized I/O, surviving matches) is never lost to a throw.
+	prMatches.sweepStale(nowS() - PR_STALE_TTL_S);
+	const reactor = new Reactor({ slack, memo, prMatches, job });
+
+	// Every mutation Reactor makes (memo.ensure, prMatches.set/delete) leaves
+	// the structure individually consistent, so saving in `finally` always
+	// writes a valid snapshot — partial progress survives a throw.
 	try {
-		prMatches.sweepStale(nowS() - PR_STALE_TTL_S);
-		const reactor = new Reactor({ slack, memo, prMatches, job });
 		await reactor.applyReactions(await reactor.findMatches());
 	} finally {
 		const evicted = prMatches.capByLru(MAX_PR_ENTRIES);
