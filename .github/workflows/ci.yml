@@ -12,12 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: '24', cache: 'npm' }
-      - name: install act
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/nektos/act/master/install.sh \
-            | sudo bash -s -- -b /usr/local/bin
+      - uses: jdx/mise-action@v2
       - name: pre-pull act image
         run: docker pull catthehacker/ubuntu:act-latest
       - run: npm ci
