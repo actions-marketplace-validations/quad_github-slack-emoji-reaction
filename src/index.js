@@ -156,15 +156,26 @@ export class Reactor {
 		await this.#applyReactions(await this.#findMatches());
 	}
 
+	// Returns the cached matches if we already have them, otherwise discovers
+	// fresh and caches them. Caching here (not in #applyReactions) means a
+	// throw mid-loop still leaves the discovered matches available next run.
 	async #findMatches() {
-		const cached = this.#prMatches.get(this.#job.prKey);
+		const prKey = this.#job.prKey;
+		const cached = this.#prMatches.get(prKey);
 		if (cached?.length) return cached;
 		const channels = await this.#memo.ensure(
 			"channels",
 			CHANNEL_LIST_TTL_S,
 			() => fetchChannels(this.#slack),
 		);
-		return discoverMatches(this.#slack, this.#memo, this.#job.pr, channels);
+		const matches = await discoverMatches(
+			this.#slack,
+			this.#memo,
+			this.#job.pr,
+			channels,
+		);
+		this.#prMatches.set(prKey, matches);
+		return matches;
 	}
 
 	// React to as many matches as the per-run cap allows; the rest roll
@@ -172,12 +183,7 @@ export class Reactor {
 	async #applyReactions(matches) {
 		const prKey = this.#job.prKey;
 		const toReact = matches.slice(0, REACTIONS_PER_RUN_CAP);
-
-		// Persist the full set up-front so a throw mid-loop still leaves the
-		// discovered matches in cache for the next run; keep it in sync as
-		// stale matches drop out.
 		let surviving = [...matches];
-		this.#prMatches.set(prKey, surviving);
 
 		for (const m of toReact) {
 			const result = await this.#reactToMatch(m);

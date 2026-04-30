@@ -29,24 +29,27 @@ export class Memo {
 		return value;
 	}
 
-	evictOlderThan(ttlS) {
-		const cutoff = nowS() - ttlS;
+	#evict(keep) {
 		this.#cells = Object.fromEntries(
-			Object.entries(this.#cells).filter(([, v]) => v.refreshedAt >= cutoff),
+			Object.entries(this.#cells).filter(([k, v]) => keep(v, k)),
 		);
 	}
 
-	// Eviction strategy: keep the `max` most-recently-refreshed entries
-	// (oldest refreshedAt dropped first). LRU-shaped only when every
-	// interaction with a key ends in a set — true for prMatches but not in
-	// general; readers shouldn't bank on it.
+	evictOlderThan(ttlS) {
+		const cutoff = nowS() - ttlS;
+		this.#evict((v) => v.refreshedAt >= cutoff);
+	}
+
+	// LRU-shaped only when every interaction with a key ends in a set — true
+	// for prMatches but not in general; readers shouldn't bank on it.
 	evictOldestPast(max) {
 		const keys = Object.keys(this.#cells);
 		if (keys.length <= max) return;
 		keys.sort(
 			(a, b) => this.#cells[a].refreshedAt - this.#cells[b].refreshedAt,
 		);
-		for (const k of keys.slice(0, keys.length - max)) delete this.#cells[k];
+		const keep = new Set(keys.slice(keys.length - max));
+		this.#evict((_, k) => keep.has(k));
 	}
 
 	toJSON() {

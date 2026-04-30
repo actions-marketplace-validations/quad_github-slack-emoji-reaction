@@ -38,21 +38,10 @@ export class CacheClient {
 	async restore(signal) {
 		if (!this.#enabled) return null;
 		try {
-			const lookup = this.#url("cache");
-			// Sentinel primary key never matches; the second key is a prefix lookup
-			// against every entry we've saved, returning the most recent one.
-			lookup.searchParams.set(
-				"keys",
-				`${CacheClient.#KEY_PREFIX}__sentinel__,${CacheClient.#KEY_PREFIX}`,
-			);
-			lookup.searchParams.set("version", CacheClient.#VERSION);
-			const res = await fetch(lookup, { headers: this.#headers, signal });
-			if (!res.ok) return null;
-			const meta = await res.json();
+			const meta = await this.#lookup(signal);
 			if (!meta?.archiveLocation) return null;
 			const blob = await fetch(meta.archiveLocation, { signal });
-			if (!blob.ok) return null;
-			return await blob.json();
+			return blob.ok ? await blob.json() : null;
 		} catch {
 			return null;
 		}
@@ -62,37 +51,58 @@ export class CacheClient {
 		if (!this.#enabled) return;
 		try {
 			const body = Buffer.from(JSON.stringify(state), "utf8");
-
-			const reserveRes = await this.#send("caches", {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({
-					key: `${CacheClient.#KEY_PREFIX}${this.#runKey}`,
-					version: CacheClient.#VERSION,
-					cacheSize: body.length,
-				}),
-			});
-			if (!reserveRes.ok) return;
-			const cacheId = (await reserveRes.json())?.cacheId;
+			const cacheId = await this.#reserve(body.length);
 			if (!cacheId) return;
-
-			const uploadRes = await this.#send(`caches/${cacheId}`, {
-				method: "PATCH",
-				headers: {
-					"Content-Type": "application/octet-stream",
-					"Content-Range": `bytes 0-${body.length - 1}/*`,
-				},
-				body,
-			});
-			if (!uploadRes.ok) return;
-
-			await this.#send(`caches/${cacheId}`, {
-				method: "POST",
-				headers: { "Content-Type": "application/json" },
-				body: JSON.stringify({ size: body.length }),
-			});
+			if (!(await this.#upload(cacheId, body))) return;
+			await this.#commit(cacheId, body.length);
 		} catch {
 			// swallow
 		}
+	}
+
+	// Sentinel primary key never matches; the second key is a prefix lookup
+	// against every entry we've saved, returning the most recent one.
+	async #lookup(signal) {
+		const url = this.#url("cache");
+		url.searchParams.set(
+			"keys",
+			`${CacheClient.#KEY_PREFIX}__sentinel__,${CacheClient.#KEY_PREFIX}`,
+		);
+		url.searchParams.set("version", CacheClient.#VERSION);
+		const res = await fetch(url, { headers: this.#headers, signal });
+		return res.ok ? await res.json() : null;
+	}
+
+	async #reserve(size) {
+		const res = await this.#send("caches", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				key: `${CacheClient.#KEY_PREFIX}${this.#runKey}`,
+				version: CacheClient.#VERSION,
+				cacheSize: size,
+			}),
+		});
+		return res.ok ? ((await res.json())?.cacheId ?? null) : null;
+	}
+
+	async #upload(cacheId, body) {
+		const res = await this.#send(`caches/${cacheId}`, {
+			method: "PATCH",
+			headers: {
+				"Content-Type": "application/octet-stream",
+				"Content-Range": `bytes 0-${body.length - 1}/*`,
+			},
+			body,
+		});
+		return res.ok;
+	}
+
+	async #commit(cacheId, size) {
+		await this.#send(`caches/${cacheId}`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ size }),
+		});
 	}
 }

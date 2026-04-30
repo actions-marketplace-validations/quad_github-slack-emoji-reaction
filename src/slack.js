@@ -64,8 +64,8 @@ export class SlackClient {
 			throw new NetworkError(method, e);
 		}
 		const body = await res.json();
-		SlackClient.#enforceRateLimit(method, res, body);
 		SlackClient.#enforceAuth(body);
+		SlackClient.#enforceRateLimit(method, res, body);
 		return body;
 	}
 
@@ -104,7 +104,7 @@ export class SlackClient {
 	}
 
 	async *paginate(method, baseParams, maxPages) {
-		let cursor = "";
+		let cursor;
 		for (let page = 0; page < maxPages; page++) {
 			const res = await this.call(method, {
 				...baseParams,
@@ -112,7 +112,7 @@ export class SlackClient {
 			});
 			yield res;
 			if (!res.ok) return;
-			cursor = res.response_metadata?.next_cursor || "";
+			cursor = res.response_metadata?.next_cursor;
 			if (!cursor) return;
 		}
 	}
