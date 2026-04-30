@@ -42,10 +42,10 @@ export class CacheClient {
 		return new URL(path, this.#base);
 	}
 
-	#send(url, init = {}) {
+	#send(url, init) {
 		return fetch(url, {
 			...init,
-			headers: { ...this.#headers, ...(init.headers || {}) },
+			headers: { ...this.#headers, ...init.headers },
 		});
 	}
 
