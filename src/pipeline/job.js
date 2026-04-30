@@ -3,35 +3,54 @@ import fs from "node:fs";
 
 import { FatalError } from "../errors.js";
 
-const STATUS_APPROVED = "approved";
-const STATUS_CHANGES_REQUESTED = "changes-requested";
-const STATUS_COMMENTED = "commented";
-const STATUS_MERGED = "merged";
-const STATUS_CLOSED = "closed";
-
-const FLIP_OPPOSITE = {
-	[STATUS_APPROVED]: STATUS_CHANGES_REQUESTED,
-	[STATUS_CHANGES_REQUESTED]: STATUS_APPROVED,
+const STATUS_PREDICATES = {
+	approved: (s) => s.reviewDecision === "approved",
+	"changes-requested": (s) => s.reviewDecision === "changes_requested",
+	commented: (s) => s.hasUserComment,
+	merged: (s) => s.merged,
+	closed: (s) => !s.merged && s.closed,
 };
 
-export function deriveStatus(eventName, payload) {
-	if (eventName === "pull_request_review") {
-		if (payload.action !== "submitted") return null;
-		const state = payload.review?.state;
-		if (state === "approved") return STATUS_APPROVED;
-		if (state === "changes_requested") return STATUS_CHANGES_REQUESTED;
-		if (state === "commented") {
-			// Bot-filed reviews (Dependabot, Renovate, etc.) are constant noise.
-			if (payload.review?.user?.type === "Bot") return null;
-			return STATUS_COMMENTED;
-		}
-		return null;
-	}
-	if (eventName === "pull_request") {
-		if (payload.action !== "closed") return null;
-		return payload.pull_request?.merged ? STATUS_MERGED : STATUS_CLOSED;
-	}
-	return null;
+export function desiredEmojis(state, cfg) {
+	return new Set(
+		Object.entries(cfg)
+			.filter(([key, emoji]) => emoji && STATUS_PREDICATES[key](state))
+			.map(([, emoji]) => emoji),
+	);
+}
+
+const PR_QUERY = `query($owner: String!, $repo: String!, $num: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $num) {
+      merged
+      closed
+      reviewDecision
+      reviews(first: 100, states: [COMMENTED]) { nodes { author { __typename } } }
+    }
+  }
+}`;
+
+const REVIEW_DECISION = {
+	APPROVED: "approved",
+	CHANGES_REQUESTED: "changes_requested",
+};
+
+export async function fetchPRState(github, pr) {
+	const data = await github.graphql(PR_QUERY, {
+		owner: pr.owner,
+		repo: pr.repo,
+		num: pr.num,
+	});
+	const p = FatalError.required(
+		data.repository?.pullRequest,
+		`PR ${pr.owner}/${pr.repo}#${pr.num} not found`,
+	);
+	return {
+		merged: p.merged,
+		closed: p.closed,
+		reviewDecision: REVIEW_DECISION[p.reviewDecision] ?? null,
+		hasUserComment: p.reviews.nodes.some((r) => r.author?.__typename !== "Bot"),
+	};
 }
 
 export function prContext(payload) {
@@ -48,43 +67,39 @@ export function readJob() {
 	const input = (name) =>
 		(process.env[`INPUT_${name.toUpperCase()}`] || "").trim();
 
-	const eventPath = FatalError.notNull(
+	const eventPath = FatalError.required(
 		process.env.GITHUB_EVENT_PATH,
 		"GITHUB_EVENT_PATH not set; not running inside GitHub Actions",
 	);
-	const eventName = FatalError.notNull(
-		process.env.GITHUB_EVENT_NAME,
-		"GITHUB_EVENT_NAME not set; not running inside GitHub Actions",
-	);
 	const payload = JSON.parse(fs.readFileSync(eventPath, "utf8"));
 
-	const status = deriveStatus(eventName, payload);
-	if (!status) return null;
-	const emoji = input(`emoji-${status}`);
-	if (!emoji) return null;
+	const entries = Object.keys(STATUS_PREDICATES)
+		.map((k) => [k, input(`emoji-${k}`)])
+		.filter(([, v]) => v);
+	if (entries.length === 0) return null;
+	const cfg = Object.fromEntries(entries);
 
-	const token = input("slack-token");
-	if (!token) {
-		// Fork PRs run with empty secrets
+	const slackToken = input("slack-token");
+	if (!slackToken) {
+		// Fork PRs run with empty secrets; that's expected, not a misconfig.
 		if (payload.pull_request?.head?.repo?.fork) return null;
 		throw new FatalError("slack-token is missing; set the SLACK_TOKEN secret");
 	}
 
-	const pr = FatalError.notNull(
+	const githubToken = FatalError.required(
+		input("github-token"),
+		"github-token is missing; the workflow's GITHUB_TOKEN should default it",
+	);
+
+	const pr = FatalError.required(
 		prContext(payload),
 		"could not derive PR context from payload",
 	);
 
-	const oppositeStatus = FLIP_OPPOSITE[status];
-	const opposite = oppositeStatus ? input(`emoji-${oppositeStatus}`) : "";
-
 	return {
-		status,
-		token,
-		emoji,
-		opposite,
-		isRerun: Number(process.env.GITHUB_RUN_ATTEMPT) > 1,
-		closesPR: status === STATUS_MERGED || status === STATUS_CLOSED,
+		slackToken,
+		githubToken,
+		cfg,
 		pr,
 		prKey: `${pr.owner}/${pr.repo}#${pr.num}`,
 	};

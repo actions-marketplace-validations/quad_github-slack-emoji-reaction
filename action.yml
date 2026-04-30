@@ -4,6 +4,10 @@ inputs:
   slack-token:
     required: true
     description: Slack bot token (xoxb-…) with channels:read, groups:read, channels:history, groups:history, reactions:read, reactions:write.
+  github-token:
+    required: false
+    default: ${{ github.token }}
+    description: GitHub token for reading PR state; defaults to the workflow's GITHUB_TOKEN. Needs pull-requests:read.
   emoji-approved:
     required: false
     default: white_check_mark

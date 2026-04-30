@@ -5,10 +5,11 @@ import path from "node:path";
 import test from "node:test";
 import { CacheClient } from "../src/cache.js";
 import { FatalError } from "../src/errors.js";
+import { GitHubClient } from "../src/github.js";
 import { Memo } from "../src/memo.js";
 import { applyReactions } from "../src/pipeline/apply-reactions.js";
 import { findMatches } from "../src/pipeline/find-matches.js";
-import { deriveStatus, prContext } from "../src/pipeline/job.js";
+import { desiredEmojis, fetchPRState, prContext } from "../src/pipeline/job.js";
 import { SlackClient } from "../src/slack.js";
 
 // ============================================================ static helpers
@@ -24,91 +25,118 @@ const upstream = (rel) => {
 	return structuredClone(fixtureCache.get(rel));
 };
 
-const variant = (rel, patch) => {
-	const p = upstream(rel);
-	for (const key of Object.keys(patch)) {
-		const segs = key.split(".");
-		const target = segs.slice(0, -1).reduce((o, k) => o[k], p);
-		target[segs[segs.length - 1]] = patch[key];
-	}
-	return p;
+// ---------------------------------------------------------------- desiredEmojis
+
+const FULL_CFG = {
+	approved: "white_check_mark",
+	"changes-requested": "warning",
+	commented: "speech_balloon",
+	merged: "rocket",
+	closed: "x",
 };
 
-// ---------------------------------------------------------------- deriveStatus
-
-test("deriveStatus: pull_request_review submitted approved → approved", () => {
-	const payload = variant("pull_request_review/submitted.payload.json", {
-		"review.state": "approved",
-	});
-	assert.equal(deriveStatus("pull_request_review", payload), "approved");
-});
-
-test("deriveStatus: pull_request_review submitted changes_requested → changes-requested", () => {
-	const payload = variant("pull_request_review/submitted.payload.json", {
-		"review.state": "changes_requested",
-	});
-	assert.equal(
-		deriveStatus("pull_request_review", payload),
-		"changes-requested",
+test("desiredEmojis: merged + approved + hasUserComment → {merged, approved, commented}", () => {
+	const set = desiredEmojis(
+		{
+			merged: true,
+			closed: true,
+			reviewDecision: "approved",
+			hasUserComment: true,
+		},
+		FULL_CFG,
+	);
+	assert.deepEqual(
+		[...set].sort(),
+		["rocket", "speech_balloon", "white_check_mark"].sort(),
 	);
 });
 
-test("deriveStatus: pull_request closed merged=true → merged", () => {
-	const payload = variant("pull_request/closed.payload.json", {
-		"pull_request.merged": true,
+test("desiredEmojis: changes_requested + closed-not-merged → {changes-requested, closed}", () => {
+	const set = desiredEmojis(
+		{
+			merged: false,
+			closed: true,
+			reviewDecision: "changes_requested",
+			hasUserComment: false,
+		},
+		FULL_CFG,
+	);
+	assert.deepEqual([...set].sort(), ["warning", "x"].sort());
+});
+
+test('desiredEmojis: cfg.approved="" omits the approved emoji even when reviewDecision=approved', () => {
+	const set = desiredEmojis(
+		{
+			merged: false,
+			closed: false,
+			reviewDecision: "approved",
+			hasUserComment: false,
+		},
+		{ ...FULL_CFG, approved: "" },
+	);
+	assert.equal(set.size, 0);
+});
+
+test("desiredEmojis: empty state → empty set", () => {
+	const set = desiredEmojis(
+		{
+			merged: false,
+			closed: false,
+			reviewDecision: null,
+			hasUserComment: false,
+		},
+		FULL_CFG,
+	);
+	assert.equal(set.size, 0);
+});
+
+// ---------------------------------------------------------------- fetchPRState
+
+test("fetchPRState: parses GraphQL pullRequest into reconciliation state", async (t) => {
+	const calls = [];
+	t.mock.method(globalThis, "fetch", async (url, opts) => {
+		calls.push({ url: String(url), body: JSON.parse(opts.body) });
+		return {
+			ok: true,
+			status: 200,
+			json: async () => ({
+				data: {
+					repository: {
+						pullRequest: {
+							merged: true,
+							closed: true,
+							reviewDecision: "APPROVED",
+							reviews: {
+								nodes: [
+									{ author: { __typename: "User" } },
+									{ author: { __typename: "Bot" } },
+								],
+							},
+						},
+					},
+				},
+			}),
+		};
 	});
-	assert.equal(deriveStatus("pull_request", payload), "merged");
-});
-
-test("deriveStatus: pull_request closed merged=false → closed", () => {
-	// Upstream closed.payload.json has pull_request.merged: false verbatim.
-	assert.equal(
-		deriveStatus("pull_request", upstream("pull_request/closed.payload.json")),
-		"closed",
-	);
-});
-
-test("deriveStatus: pull_request_review submitted commented → commented", () => {
-	// Upstream submitted.payload.json has review.state: commented verbatim.
-	assert.equal(
-		deriveStatus(
-			"pull_request_review",
-			upstream("pull_request_review/submitted.payload.json"),
-		),
-		"commented",
-	);
-});
-
-test("deriveStatus: comment-only review by a Bot reviewer is filtered (returns null)", () => {
-	const payload = variant("pull_request_review/submitted.payload.json", {
-		"review.user.type": "Bot",
+	const github = new GitHubClient("ghs_token", new AbortController().signal);
+	const state = await fetchPRState(github, {
+		owner: "octo",
+		repo: "hello",
+		num: 42,
 	});
-	assert.equal(deriveStatus("pull_request_review", payload), null);
-});
-
-test("deriveStatus: bot filter does NOT apply to approved reviews", () => {
-	// Auto-approve bots are usually meaningful; only the noisy comment path is filtered.
-	const payload = variant("pull_request_review/submitted.payload.json", {
-		"review.state": "approved",
-		"review.user.type": "Bot",
+	assert.deepEqual(state, {
+		merged: true,
+		closed: true,
+		reviewDecision: "approved",
+		hasUserComment: true,
 	});
-	assert.equal(deriveStatus("pull_request_review", payload), "approved");
-});
-
-test("deriveStatus: returns null for non-mapped events", () => {
-	// dismissed reviews, opened PRs, and unrelated events.
-	assert.equal(
-		deriveStatus(
-			"pull_request_review",
-			upstream("pull_request_review/dismissed.payload.json"),
-		),
-		null,
-	);
-	assert.equal(
-		deriveStatus("pull_request", upstream("pull_request/opened.payload.json")),
-		null,
-	);
-	assert.equal(deriveStatus("issues", { action: "opened" }), null);
+	assert.equal(calls.length, 1);
+	assert.match(calls[0].url, /\/graphql$/);
+	assert.deepEqual(calls[0].body.variables, {
+		owner: "octo",
+		repo: "hello",
+		num: 42,
+	});
 });
 
 // ---------------------------------------------------------------- prContext
@@ -169,13 +197,14 @@ const slackFor = (t, scripts) => {
 	return { slack, calls };
 };
 
-// Wires up findMatches+applyReactions for run() tests. By default seeds a
-// cached match so the run skips discovery — callers exercising the discovery
-// path pass `cached: null`. Returns prMatches so tests can observe outcomes.
-const setupReactor = ({
+// Wires up findMatches+applyReactions for end-to-end run tests. By default
+// seeds a cached match so the run skips discovery — callers exercising the
+// discovery path pass `cached: null`. Returns prMatches so tests can observe
+// outcomes.
+const setupRun = ({
 	slack,
 	job = {},
-	botUserId = null,
+	botUserId = "U0BOT",
 	cached = [{ channel: "C1", ts: "1.0" }],
 }) => {
 	const memo = new Memo({});
@@ -184,21 +213,18 @@ const setupReactor = ({
 	const prMatches = new Memo({});
 	if (cached) prMatches.set(prKey, cached);
 	const fullJob = {
-		emoji: "eyes",
-		opposite: "",
-		isRerun: false,
+		desired: new Set(["eyes"]),
+		managed: new Set(["eyes"]),
 		closesPR: false,
 		prKey,
 		pr: { owner: "octo", repo: "hello", num: 42 },
 		...job,
 	};
-	const reactor = {
-		run: async () => {
-			const matches = await findMatches(slack, memo, prMatches, fullJob);
-			await applyReactions(slack, memo, prMatches, fullJob, matches);
-		},
+	const run = async () => {
+		const matches = await findMatches(slack, memo, prMatches, fullJob);
+		await applyReactions(slack, memo, prMatches, fullJob, matches);
 	};
-	return { reactor, prMatches, prKey };
+	return { run, prMatches, prKey };
 };
 
 // ---------------------------------------------------------------- SlackClient.call
@@ -348,143 +374,175 @@ test("CacheClient: warns when cache is unavailable inside GHA (misconfig)", asyn
 	}
 });
 
-// ---------------------------------------------------------------- Reactor.run (withdraw opposite, with cached match)
+// ---------------------------------------------------------------- applyReactions (reconciliation, with cached match)
 
-test("Reactor.run: approved with our bot owning a stale changes-requested removes the warning, then adds approved", async (t) => {
+// Helper: a reactions.get response carrying a single reaction.
+const reactionsGetWith = (reactions) => ({
+	body: { ok: true, message: { reactions } },
+});
+
+test("applyReactions: bot already has the desired emoji → no add or remove", async (t) => {
 	const { slack, calls } = slackFor(t, {
 		"reactions.get": [
-			{
-				body: {
-					ok: true,
-					message: {
-						reactions: [
-							{ name: "warning", users: ["U0BOT", "U1HUMAN"], count: 2 },
-						],
-					},
-				},
-			},
+			reactionsGetWith([{ name: "eyes", users: ["U0BOT"], count: 1 }]),
+		],
+	});
+	const { run } = setupRun({ slack });
+	await run();
+	assert.deepEqual(
+		calls.map((c) => c.method),
+		["reactions.get"],
+	);
+});
+
+test("applyReactions: bot has obsolete (managed) emoji + desired wants a different one → remove old, add new", async (t) => {
+	const { slack, calls } = slackFor(t, {
+		"reactions.get": [
+			reactionsGetWith([
+				{ name: "warning", users: ["U0BOT", "U1HUMAN"], count: 2 },
+			]),
 		],
 		"reactions.remove": [{ body: { ok: true } }],
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	const { reactor } = setupReactor({
+	const { run } = setupRun({
 		slack,
-		job: { emoji: "white_check_mark", opposite: "warning" },
-		botUserId: "U0BOT",
+		job: {
+			desired: new Set(["white_check_mark"]),
+			managed: new Set(["white_check_mark", "warning"]),
+		},
 	});
-	await reactor.run();
+	await run();
 	assert.deepEqual(
 		calls.map((c) => c.method),
 		["reactions.get", "reactions.remove", "reactions.add"],
 	);
 });
 
-test("Reactor.run: approved without our bot in the warning users array does NOT remove someone else’s warning", async (t) => {
+test("applyReactions: desired empty + bot owns a managed reaction → remove it", async (t) => {
 	const { slack, calls } = slackFor(t, {
 		"reactions.get": [
-			{
-				body: {
-					ok: true,
-					message: {
-						reactions: [{ name: "warning", users: ["U1HUMAN"], count: 1 }],
-					},
-				},
-			},
+			reactionsGetWith([{ name: "eyes", users: ["U0BOT"], count: 1 }]),
+		],
+		"reactions.remove": [{ body: { ok: true } }],
+	});
+	const { run } = setupRun({
+		slack,
+		job: { desired: new Set(), managed: new Set(["eyes"]) },
+	});
+	await run();
+	assert.deepEqual(
+		calls.map((c) => c.method),
+		["reactions.get", "reactions.remove"],
+	);
+});
+
+test("applyReactions: desired empty + only a human owns the managed reaction → leave it alone", async (t) => {
+	const { slack, calls } = slackFor(t, {
+		"reactions.get": [
+			reactionsGetWith([{ name: "eyes", users: ["U1HUMAN"], count: 1 }]),
+		],
+	});
+	const { run } = setupRun({
+		slack,
+		job: { desired: new Set(), managed: new Set(["eyes"]) },
+	});
+	await run();
+	assert.deepEqual(
+		calls.map((c) => c.method),
+		["reactions.get"],
+	);
+});
+
+test("applyReactions: desired={approved, merged}, bot has approved → adds merged only (multi-emoji partial state)", async (t) => {
+	const { slack, calls } = slackFor(t, {
+		"reactions.get": [
+			reactionsGetWith([
+				{ name: "white_check_mark", users: ["U0BOT"], count: 1 },
+			]),
 		],
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	const { reactor } = setupReactor({
+	const { run } = setupRun({
 		slack,
-		job: { emoji: "white_check_mark", opposite: "warning" },
-		botUserId: "U0BOT",
+		job: {
+			desired: new Set(["white_check_mark", "rocket"]),
+			managed: new Set(["white_check_mark", "rocket"]),
+		},
 	});
-	await reactor.run();
+	await run();
 	assert.deepEqual(
 		calls.map((c) => c.method),
 		["reactions.get", "reactions.add"],
 	);
-});
-
-test("Reactor.run: when isRerun=true, skips the entire withdraw-opposite branch (re-run safety)", async (t) => {
-	const { slack, calls } = slackFor(t, {
-		"reactions.add": [{ body: { ok: true } }],
-	});
-	const { reactor } = setupReactor({
-		slack,
-		job: {
-			emoji: "white_check_mark",
-			opposite: "warning",
-			isRerun: true,
-		},
-		botUserId: "U0BOT",
-	});
-	await reactor.run();
-	assert.deepEqual(
-		calls.map((c) => c.method),
-		["reactions.add"],
+	assert.equal(
+		calls.find((c) => c.method === "reactions.add").params.name,
+		"rocket",
 	);
 });
 
-test("Reactor.run: tolerated reaction errors (already_reacted) keep the match in cache", async (t) => {
+// ---------------------------------------------------------------- applyReactions (prMatches lifecycle)
+
+test("applyReactions: tolerated reaction errors (already_reacted) keep the match in cache", async (t) => {
 	const { slack } = slackFor(t, {
+		"reactions.get": [reactionsGetWith([])],
 		"reactions.add": [{ body: { ok: false, error: "already_reacted" } }],
 	});
-	const { reactor, prMatches, prKey } = setupReactor({
+	const { run, prMatches, prKey } = setupRun({
 		slack,
-		job: { emoji: "large_purple_square" },
+		job: {
+			desired: new Set(["large_purple_square"]),
+			managed: new Set(["large_purple_square"]),
+		},
 	});
-	await reactor.run();
+	await run();
 	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "1.0" }]);
 });
 
-test("Reactor.run: stale-match errors (channel_not_found) prune the entry from cache", async (t) => {
+test("applyReactions: stale-match errors (channel_not_found) prune the entry from cache", async (t) => {
 	const { slack } = slackFor(t, {
-		"reactions.add": [{ body: { ok: false, error: "channel_not_found" } }],
+		"reactions.get": [{ body: { ok: false, error: "channel_not_found" } }],
 	});
-	const { reactor, prMatches, prKey } = setupReactor({
-		slack,
-		job: { emoji: "large_purple_square" },
-	});
-	await reactor.run();
+	const { run, prMatches, prKey } = setupRun({ slack });
+	await run();
 	assert.equal(prMatches.get(prKey), undefined);
 });
 
-test("Reactor.run: stale prune is persisted incrementally, surviving a later throw", async (t) => {
-	// Two cached matches. First is stale (prune); second throws mid-loop.
-	// Without incremental persist, the prune would be lost when the throw
-	// short-circuits the final write.
+test("applyReactions: stale prune is persisted incrementally, surviving a later throw", async (t) => {
+	// Two cached matches. First reactions.get says channel_not_found (prune);
+	// second throws invalid_auth. Without incremental persist, the prune would
+	// be lost when the throw short-circuits the final write.
 	const { slack } = slackFor(t, {
-		"reactions.add": [
+		"reactions.get": [
 			{ body: { ok: false, error: "channel_not_found" } },
 			{ body: { ok: false, error: "invalid_auth" } },
 		],
 	});
-	const { reactor, prMatches, prKey } = setupReactor({
+	const { run, prMatches, prKey } = setupRun({
 		slack,
-		job: { emoji: "eyes" },
 		cached: [
 			{ channel: "C1", ts: "1.0" },
 			{ channel: "C2", ts: "2.0" },
 		],
 	});
-	await assert.rejects(reactor.run(), (e) => e instanceof FatalError);
+	await assert.rejects(run(), (e) => e instanceof FatalError);
 	assert.deepEqual(prMatches.get(prKey), [{ channel: "C2", ts: "2.0" }]);
 });
 
-test("Reactor.run: invalid_auth on reactions.add propagates as FatalError", async (t) => {
+test("applyReactions: invalid_auth from Slack propagates as FatalError", async (t) => {
 	const { slack } = slackFor(t, {
-		"reactions.add": [{ body: { ok: false, error: "invalid_auth" } }],
+		"reactions.get": [{ body: { ok: false, error: "invalid_auth" } }],
 	});
-	const { reactor } = setupReactor({ slack });
+	const { run } = setupRun({ slack });
 	await assert.rejects(
-		reactor.run(),
+		run(),
 		(e) => e instanceof FatalError && /invalid_auth/.test(e.message),
 	);
 });
 
-// ---------------------------------------------------------------- Reactor.run (discovery, no cached match)
+// ---------------------------------------------------------------- run (discovery, no cached match)
 
-test("Reactor.run: with no cached match, paginates channels.list (filtered to is_member) and scans history", async (t) => {
+test("run: with no cached match, paginates channels.list (filtered to is_member) and scans history", async (t) => {
 	const matchingMsg = {
 		ts: "1.001",
 		text: "see <https://github.com/octo/hello/pull/42>",
@@ -513,14 +571,15 @@ test("Reactor.run: with no cached match, paginates channels.list (filtered to is
 			{ body: { ok: true, messages: [matchingMsg], has_more: false } },
 			{ body: { ok: true, messages: [matchingMsg], has_more: false } },
 		],
+		"reactions.get": [reactionsGetWith([]), reactionsGetWith([])],
 		"reactions.add": [{ body: { ok: true } }, { body: { ok: true } }],
 	});
-	const { reactor, prMatches, prKey } = setupReactor({
+	const { run, prMatches, prKey } = setupRun({
 		slack,
-		job: { emoji: "x" },
+		job: { desired: new Set(["x"]), managed: new Set(["x"]) },
 		cached: null,
 	});
-	await reactor.run();
+	await run();
 	// channels.list paginated to completion; both is_member channels (C1, C3
 	// — not C2) scanned in some order (discoverMatches shuffles).
 	assert.equal(
@@ -541,7 +600,7 @@ test("Reactor.run: with no cached match, paginates channels.list (filtered to is
 	);
 });
 
-test("Reactor.run: discovery rejects /pull/123 ↔ /pull/1234 substring trap", async (t) => {
+test("run: discovery rejects /pull/123 ↔ /pull/1234 substring trap", async (t) => {
 	const { slack } = slackFor(t, {
 		"conversations.list": [
 			{
@@ -567,18 +626,18 @@ test("Reactor.run: discovery rejects /pull/123 ↔ /pull/1234 substring trap", a
 			},
 		],
 	});
-	const { reactor, prMatches, prKey } = setupReactor({
+	const { run, prMatches, prKey } = setupRun({
 		slack,
-		job: { emoji: "x" },
+		job: { desired: new Set(["x"]), managed: new Set(["x"]) },
 		cached: null,
 	});
-	await reactor.run();
+	await run();
 	// No reactions.add (no match), no entry in cache (terminal-ish empty
 	// → delete handled by the "non-terminal + nothing surviving" branch).
 	assert.equal(prMatches.get(prKey), undefined);
 });
 
-test("Reactor.run: discovery extracts PR URL from message blocks (not just text)", async (t) => {
+test("run: discovery extracts PR URL from message blocks (not just text)", async (t) => {
 	const msgWithBlocks = {
 		ts: "1.5",
 		blocks: [
@@ -608,13 +667,14 @@ test("Reactor.run: discovery extracts PR URL from message blocks (not just text)
 		"conversations.history": [
 			{ body: { ok: true, messages: [msgWithBlocks], has_more: false } },
 		],
+		"reactions.get": [reactionsGetWith([])],
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	const { reactor, prMatches, prKey } = setupReactor({
+	const { run, prMatches, prKey } = setupRun({
 		slack,
-		job: { emoji: "x" },
+		job: { desired: new Set(["x"]), managed: new Set(["x"]) },
 		cached: null,
 	});
-	await reactor.run();
+	await run();
 	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "1.5" }]);
 });

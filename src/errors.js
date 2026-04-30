@@ -2,7 +2,7 @@
 // Operator-fixable failures: top-level catch prints the message and exits 1
 // without a stack. Anything else propagates as an unhandled rejection.
 export class FatalError extends Error {
-	static notNull(value, message) {
+	static required(value, message) {
 		if (!value) throw new FatalError(message);
 		return value;
 	}
