@@ -501,7 +501,11 @@ export class Reactor {
 		this.#job = job;
 	}
 
-	async findMatches() {
+	async run() {
+		await this.#applyReactions(await this.#findMatches());
+	}
+
+	async #findMatches() {
 		const cached = this.#prMatches.get(this.#job.prKey);
 		if (cached?.length) return cached;
 		const channels = await this.#memo.ensure(
@@ -515,7 +519,7 @@ export class Reactor {
 	// React to as many matches as the per-run cap allows, keeping prMatches
 	// in sync per iteration so a mid-loop throw doesn't lose discovered work
 	// or leave a terminal PR's entry stranded.
-	async applyReactions(matches) {
+	async #applyReactions(matches) {
 		const job = this.#job;
 		const prMatches = this.#prMatches;
 		const toReact = matches.slice(0, REACTIONS_PER_RUN_CAP);
@@ -531,7 +535,7 @@ export class Reactor {
 		prMatches.set(job.prKey, surviving);
 
 		for (const m of toReact) {
-			const result = await this.reactToMatch(m);
+			const result = await this.#reactToMatch(m);
 			if (STALE_MATCH_ERRORS.has(result.error)) {
 				surviving = surviving.filter((x) => x !== m);
 				prMatches.set(job.prKey, surviving);
@@ -541,7 +545,7 @@ export class Reactor {
 		if (job.isTerminal || !surviving.length) prMatches.delete(job.prKey);
 	}
 
-	async reactToMatch(match) {
+	async #reactToMatch(match) {
 		const where = `${match.channel}/${match.ts}`;
 		await this.#flipCleanup(match);
 		const add = await this.#slack.call("reactions.add", {
@@ -651,7 +655,7 @@ async function main() {
 	// the structure individually consistent, so saving in `finally` always
 	// writes a valid snapshot — partial progress survives a throw.
 	try {
-		await reactor.applyReactions(await reactor.findMatches());
+		await reactor.run();
 	} finally {
 		const evicted = prMatches.capByOldest(MAX_PR_ENTRIES);
 		if (evicted) console.warn(`pr-entries safety cap; evicted ${evicted}`);

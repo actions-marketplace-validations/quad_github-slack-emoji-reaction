@@ -252,15 +252,31 @@ const slackFor = (scripts) => {
 	return { slack, calls };
 };
 
-const makeReactor = ({ slack, job = {}, botUserId = null }) => {
+// Build a Reactor seeded with one cached match so run() skips discovery
+// and goes straight into the reaction loop — that's the surface these tests
+// exercise. Returns the prMatches handle too so tests can observe whether
+// the entry was pruned (stale-match errors) or kept (tolerated/success).
+const setupReactor = ({ slack, job = {}, botUserId = null }) => {
 	const memo = new Memo();
 	if (botUserId) memo.set("botUserId", botUserId);
-	return new Reactor({
+	const prKey = "o/r#1";
+	const prMatches = new Memo();
+	prMatches.set(prKey, [{ channel: "C1", ts: "1.0" }]);
+	const reactor = new Reactor({
 		slack,
 		memo,
-		prMatches: new Memo(),
-		job: { addEmoji: "eyes", removeEmoji: "", isRerun: false, ...job },
+		prMatches,
+		job: {
+			addEmoji: "eyes",
+			removeEmoji: "",
+			isRerun: false,
+			isTerminal: false,
+			prKey,
+			pr: { owner: "o", repo: "r", num: 1 },
+			...job,
+		},
 	});
+	return { reactor, prMatches, prKey };
 };
 
 // ---------------------------------------------------------------- slackCall
@@ -505,9 +521,9 @@ test("fetchBotUserId: throws AuthError on invalid_auth (so caller can clean-exit
 	);
 });
 
-// ---------------------------------------------------------------- reactToMatch (flip cleanup)
+// ---------------------------------------------------------------- Reactor.run (flip cleanup)
 
-test("reactToMatch: approved with our bot owning a stale changes-requested removes the warning, then adds approved", async () => {
+test("Reactor.run: approved with our bot owning a stale changes-requested removes the warning, then adds approved", async () => {
 	const { slack, calls } = slackFor({
 		"reactions.get": [
 			{
@@ -524,19 +540,19 @@ test("reactToMatch: approved with our bot owning a stale changes-requested remov
 		"reactions.remove": [{ body: { ok: true } }],
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	const result = await makeReactor({
+	const { reactor } = setupReactor({
 		slack,
 		job: { addEmoji: "white_check_mark", removeEmoji: "warning" },
 		botUserId: "U0BOT",
-	}).reactToMatch({ channel: "C1", ts: "1.0" });
-	assert.equal(result.ok, true);
+	});
+	await reactor.run();
 	assert.deepEqual(
 		calls.map((c) => c.method),
 		["reactions.get", "reactions.remove", "reactions.add"],
 	);
 });
 
-test("reactToMatch: approved without our bot in the warning users array does NOT remove someone else’s warning", async () => {
+test("Reactor.run: approved without our bot in the warning users array does NOT remove someone else’s warning", async () => {
 	const { slack, calls } = slackFor({
 		"reactions.get": [
 			{
@@ -550,23 +566,23 @@ test("reactToMatch: approved without our bot in the warning users array does NOT
 		],
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	await makeReactor({
+	const { reactor } = setupReactor({
 		slack,
 		job: { addEmoji: "white_check_mark", removeEmoji: "warning" },
 		botUserId: "U0BOT",
-	}).reactToMatch({ channel: "C1", ts: "1.0" });
-	// No reactions.remove call.
+	});
+	await reactor.run();
 	assert.deepEqual(
 		calls.map((c) => c.method),
 		["reactions.get", "reactions.add"],
 	);
 });
 
-test("reactToMatch: when isRerun=true, skips the entire flip-cleanup branch (re-run safety)", async () => {
+test("Reactor.run: when isRerun=true, skips the entire flip-cleanup branch (re-run safety)", async () => {
 	const { slack, calls } = slackFor({
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	await makeReactor({
+	const { reactor } = setupReactor({
 		slack,
 		job: {
 			addEmoji: "white_check_mark",
@@ -574,43 +590,45 @@ test("reactToMatch: when isRerun=true, skips the entire flip-cleanup branch (re-
 			isRerun: true,
 		},
 		botUserId: "U0BOT",
-	}).reactToMatch({ channel: "C1", ts: "1.0" });
-	// No reactions.get, no reactions.remove. Just the additive add.
+	});
+	await reactor.run();
 	assert.deepEqual(
 		calls.map((c) => c.method),
 		["reactions.add"],
 	);
 });
 
-test("reactToMatch: tolerated reaction errors (already_reacted) do not throw", async () => {
+test("Reactor.run: tolerated reaction errors (already_reacted) keep the match in cache", async () => {
 	const { slack } = slackFor({
 		"reactions.add": [{ body: { ok: false, error: "already_reacted" } }],
 	});
-	// No removeEmoji passed so flip cleanup is skipped.
-	const result = await makeReactor({
+	const { reactor, prMatches, prKey } = setupReactor({
 		slack,
 		job: { addEmoji: "large_purple_square" },
-	}).reactToMatch({ channel: "C1", ts: "1.0" });
-	assert.equal(result.error, "already_reacted");
+	});
+	await reactor.run();
+	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "1.0" }]);
 });
 
-test("reactToMatch: stale-match errors (channel_not_found) surface so caller can prune cache", async () => {
+test("Reactor.run: stale-match errors (channel_not_found) prune the entry from cache", async () => {
 	const { slack } = slackFor({
 		"reactions.add": [{ body: { ok: false, error: "channel_not_found" } }],
 	});
-	const result = await makeReactor({
+	const { reactor, prMatches, prKey } = setupReactor({
 		slack,
 		job: { addEmoji: "large_purple_square" },
-	}).reactToMatch({ channel: "C1", ts: "1.0" });
-	assert.equal(result.error, "channel_not_found");
+	});
+	await reactor.run();
+	assert.equal(prMatches.get(prKey), undefined);
 });
 
-test("reactToMatch: invalid_auth on reactions.add propagates as AuthError", async () => {
+test("Reactor.run: invalid_auth on reactions.add propagates as AuthError", async () => {
 	const { slack } = slackFor({
 		"reactions.add": [{ body: { ok: false, error: "invalid_auth" } }],
 	});
+	const { reactor } = setupReactor({ slack });
 	await assert.rejects(
-		makeReactor({ slack }).reactToMatch({ channel: "C1", ts: "1.0" }),
+		reactor.run(),
 		(e) => e instanceof AuthError && e.code === "invalid_auth",
 	);
 });
