@@ -388,8 +388,11 @@ export class Memo {
 		);
 	}
 
-	// Keep the most-recently-refreshed `max` entries. Returns count evicted.
-	capByLru(max) {
+	// Keep the `max` most-recently-refreshed entries (oldest refreshedAt
+	// dropped first). Returns count evicted. This is LRU-shaped only when
+	// every interaction with a key ends in a set — true for prMatches but
+	// not in general; readers shouldn't bank on access-time tracking.
+	capByOldest(max) {
 		const keys = Object.keys(this.#cells);
 		if (keys.length <= max) return 0;
 		keys.sort(
@@ -650,7 +653,7 @@ async function main() {
 	try {
 		await reactor.applyReactions(await reactor.findMatches());
 	} finally {
-		const evicted = prMatches.capByLru(MAX_PR_ENTRIES);
+		const evicted = prMatches.capByOldest(MAX_PR_ENTRIES);
 		if (evicted) console.warn(`pr-entries safety cap; evicted ${evicted}`);
 		await cache.save({ memo, prMatches });
 	}

@@ -42,7 +42,7 @@ commit. See `fixtures/SOURCE.md` for the pin and refresh recipe.
   auth-error detection.
 - **`CacheClient`** — restore/save against the GHA Cache v1 API.
 - **`Memo`** — keyed `{value, refreshedAt}` cells with TTL-aware
-  `ensure`, `sweepStale`, `capByLru`. Used for both memoized I/O and
+  `ensure`, `sweepStale`, `capByOldest`. Used for both memoized I/O and
   the per-PR match map.
 - **Slack ops** — `fetchBotUserId`, `fetchChannels`, `paginate`,
   `discoverMatches`, `flipCleanup`, `reactToMatch`.
