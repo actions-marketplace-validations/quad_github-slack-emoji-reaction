@@ -23,6 +23,16 @@ const TOLERATED_REACTION_ERRORS = new Set([
 	"message_not_found",
 ]);
 
+// Errors that indicate our cached channel list is stale (bot was removed
+// from the channel, or the channel was archived since we last refreshed).
+// We can't /leave — Slack's already told us we're effectively out — but
+// we can drop the channel cache so the next run refetches.
+const STALE_CHANNEL_ERRORS = new Set([
+	"channel_not_found",
+	"not_in_channel",
+	"is_archived",
+]);
+
 const BOT_USER_ID_TTL_S = 30 * 24 * 3600;
 const CHANNEL_LIST_TTL_S = 24 * 3600;
 const PR_STALE_TTL_S = 90 * 24 * 3600;
@@ -96,7 +106,7 @@ async function fetchChannels(slack) {
 	return out;
 }
 
-async function discoverMatches(slack, pr, channels) {
+async function discoverMatches(slack, memo, pr, channels) {
 	if (channels.length > MAX_CHANNELS_PER_RUN) {
 		console.warn(
 			`channels-per-run cap (${MAX_CHANNELS_PER_RUN}) reached; skipped ${channels.length - MAX_CHANNELS_PER_RUN} remaining`,
@@ -111,9 +121,7 @@ async function discoverMatches(slack, pr, channels) {
 			HISTORY_PAGES_PER_CHANNEL,
 		)) {
 			if (!res.ok) {
-				console.warn(
-					`conversations.history ${ch.id}(${ch.name}): ${res.error}`,
-				);
+				if (STALE_CHANNEL_ERRORS.has(res.error)) memo.delete("channels");
 				break;
 			}
 			const hit = res.messages.find((msg) => linksToPR(msg, pr));
@@ -166,7 +174,7 @@ export class Reactor {
 			CHANNEL_LIST_TTL_S,
 			() => fetchChannels(this.#slack),
 		);
-		return discoverMatches(this.#slack, this.#job.pr, channels);
+		return discoverMatches(this.#slack, this.#memo, this.#job.pr, channels);
 	}
 
 	// React to as many matches as the per-run cap allows; the rest roll

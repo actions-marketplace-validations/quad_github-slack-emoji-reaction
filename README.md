@@ -101,7 +101,6 @@ emits output when something needs your attention:
 | ---------------------------------------------------- | -------------------------------------------------------------------- |
 | `slack-token is missing`                             | Set the `SLACK_TOKEN` secret. (Fork PRs run with empty secrets — that's expected and silent.) |
 | `Slack auth error: invalid_auth`                     | Token is wrong or revoked. Generate a fresh one and update the secret. |
-| `conversations.history <id>(<name>): <error>`        | A specific channel failed to scan. Often `channel_not_found` after a channel is archived. |
 | `reactions.<add\|get\|remove> … <error>`             | A specific reaction call failed with an unexpected error (e.g. `invalid_name` — check the emoji input). |
 
 For deeper debugging, set the repo secret `ACTIONS_STEP_DEBUG` to `true` and
