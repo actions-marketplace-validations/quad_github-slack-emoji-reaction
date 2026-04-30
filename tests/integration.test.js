@@ -23,5 +23,5 @@ test("spawn: pull_request closed reaches auth and exits with AuthError", () => {
 		},
 	});
 	assert.equal(r.status, 1, r.stdout + r.stderr);
-	assert.match(r.stderr, /Slack auth error: invalid_auth/);
+	assert.match(r.stdout, /::error::.*Slack auth error: invalid_auth/);
 });

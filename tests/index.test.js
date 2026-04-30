@@ -325,19 +325,19 @@ test("CacheClient: warns when cache is unavailable inside GHA (misconfig)", asyn
 		url: process.env.ACTIONS_CACHE_URL,
 		token: process.env.ACTIONS_RUNTIME_TOKEN,
 		gha: process.env.GITHUB_ACTIONS,
-		warn: console.warn,
+		log: console.log,
 	};
 	delete process.env.ACTIONS_CACHE_URL;
 	delete process.env.ACTIONS_RUNTIME_TOKEN;
 	process.env.GITHUB_ACTIONS = "true";
-	const warnings = [];
-	console.warn = (msg) => warnings.push(msg);
+	const lines = [];
+	console.log = (msg) => lines.push(msg);
 	try {
 		new CacheClient();
-		assert.equal(warnings.length, 1);
-		assert.match(warnings[0], /cache unavailable/i);
+		assert.equal(lines.length, 1);
+		assert.match(lines[0], /^::warning::.*cache unavailable/i);
 	} finally {
-		console.warn = orig.warn;
+		console.log = orig.log;
 		if (orig.url !== undefined) process.env.ACTIONS_CACHE_URL = orig.url;
 		if (orig.token !== undefined)
 			process.env.ACTIONS_RUNTIME_TOKEN = orig.token;

@@ -2,6 +2,7 @@ import fs from "node:fs";
 
 import { CacheClient } from "./cache.js";
 import { FatalError } from "./errors.js";
+import * as log from "./log.js";
 import { Memo } from "./memo.js";
 import { SlackClient } from "./slack.js";
 
@@ -103,7 +104,7 @@ async function discoverMatches(slack, memo, pr, channels) {
 	// runs instead of always missing the same tail.
 	const sample = shuffle(channels);
 	if (sample.length > MAX_CHANNELS_PER_RUN) {
-		console.warn(
+		log.warn(
 			`channels-per-run cap (${MAX_CHANNELS_PER_RUN}) reached; ${sample.length - MAX_CHANNELS_PER_RUN} not scanned this run`,
 		);
 	}
@@ -154,7 +155,7 @@ export class Reactor {
 
 	static #warnIfUntolerated(res, prefix) {
 		if (!res.ok && !Reactor.#TOLERATED_REACTION_ERRORS.has(res.error)) {
-			console.warn(`${prefix}: ${res.error}`);
+			log.warn(`${prefix}: ${res.error}`);
 		}
 		return res;
 	}
@@ -350,7 +351,7 @@ if (import.meta.main) {
 
 		const parts = [];
 		for (let cur = e; cur; cur = cur.cause) parts.push(cur.message);
-		console.error(parts.join(": "));
+		log.error(parts.join(": "));
 
 		process.exit(1);
 	}

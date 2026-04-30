@@ -1,3 +1,5 @@
+import * as log from "./log.js";
+
 // Restore/save state against the GHA Cache v1 API. ACTIONS_CACHE_URL +
 // ACTIONS_RUNTIME_TOKEN are auto-injected into every workflow job.
 export class CacheClient {
@@ -20,7 +22,7 @@ export class CacheClient {
 			// Inside GHA they should always be present — warn so misconfig
 			// is visible. Action still works; runs just don't cache.
 			if (env.GITHUB_ACTIONS) {
-				console.warn(
+				log.warn(
 					"GHA cache unavailable; runs will re-discover Slack messages each time.",
 				);
 			}
@@ -57,9 +59,8 @@ export class CacheClient {
 			const blob = await fetch(meta.archiveLocation, { signal });
 			return blob.ok ? await blob.json() : null;
 		} catch (e) {
-			// Deadline-driven aborts propagate so the run exits cleanly.
 			if (e instanceof DOMException) throw e;
-			console.warn(`cache restore failed: ${e.message}`);
+			log.warn(`cache restore failed: ${e.message}`);
 			return null;
 		}
 	}
@@ -73,9 +74,7 @@ export class CacheClient {
 			if (!(await this.#upload(cacheId, body))) return;
 			await this.#commit(cacheId, body.length);
 		} catch (e) {
-			// finally-context: must not propagate or we'd mask the original
-			// error. Log so real bugs in save aren't invisible.
-			console.warn(`cache save failed: ${e.message}`);
+			log.warn(`cache save failed: ${e.message}`);
 		}
 	}
 
