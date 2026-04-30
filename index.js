@@ -426,24 +426,16 @@ export async function fetchChannels(slack) {
 }
 
 export async function discoverMatches(slack, pr, channels) {
+	if (channels.length > MAX_CHANNELS_PER_RUN) {
+		console.warn(
+			`channels-per-run cap (${MAX_CHANNELS_PER_RUN}) reached; skipped ${channels.length - MAX_CHANNELS_PER_RUN} remaining`,
+		);
+	}
 	const matches = [];
 	const oldest = String(nowS() - HISTORY_LOOKBACK_S);
-	let scanned = 0;
-	for (const ch of channels) {
-		if (scanned >= MAX_CHANNELS_PER_RUN) {
-			console.warn(
-				`channels-per-run cap (${MAX_CHANNELS_PER_RUN}) reached; skipped ${channels.length - scanned} remaining`,
-			);
-			break;
-		}
-		scanned++;
+	for (const ch of channels.slice(0, MAX_CHANNELS_PER_RUN)) {
 		let cursor = "";
-		let foundInChannel = false;
-		for (
-			let page = 0;
-			page < HISTORY_PAGES_PER_CHANNEL && !foundInChannel;
-			page++
-		) {
+		for (let page = 0; page < HISTORY_PAGES_PER_CHANNEL; page++) {
 			const params = { channel: ch.id, oldest, limit: 200 };
 			if (cursor) params.cursor = cursor;
 			const res = await slack.call("conversations.history", params);
@@ -453,12 +445,12 @@ export async function discoverMatches(slack, pr, channels) {
 				);
 				break;
 			}
-			for (const msg of res.messages) {
-				if (urlsFromMessage(msg).some((c) => matchesPullUrl(pr, c))) {
-					matches.push({ channel: ch.id, ts: msg.ts });
-					foundInChannel = true;
-					break;
-				}
+			const hit = res.messages.find((msg) =>
+				urlsFromMessage(msg).some((c) => matchesPullUrl(pr, c)),
+			);
+			if (hit) {
+				matches.push({ channel: ch.id, ts: hit.ts });
+				break;
 			}
 			cursor = res.response_metadata?.next_cursor || "";
 			if (!cursor || !res.has_more) break;
