@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: MIT
 import * as log from "./log.js";
 
-// Restore/save state against the GHA Cache v1 API. ACTIONS_CACHE_URL +
-// ACTIONS_RUNTIME_TOKEN are auto-injected into every workflow job.
+// Restore/save state against the GHA Cache v2 API. ACTIONS_RESULTS_URL + ACTIONS_RUNTIME_TOKEN are auto-injected into every workflow job.
 export class CacheClient {
-	// Namespaced so this action's entries don't collide with anything else
-	// in the per-repo GHA cache.
+	// Namespaced so this action's entries don't collide with anything else in the per-repo GHA cache.
+	// Bump SCHEMA when the serialized cache shape changes; entries with a different version are invisible to restores.
 	static #BASE = "quad-github-slack-emoji-reaction";
-	static #KEY_PREFIX = `${CacheClient.#BASE}-state-`;
-	static #VERSION = `${CacheClient.#BASE}-v1`;
+	static #SCHEMA = "v1";
+	static #VERSION = `${CacheClient.#BASE}-${CacheClient.#SCHEMA}`;
+	static #KEY_PREFIX = `${CacheClient.#VERSION}-state-`;
+	static #SERVICE = "twirp/github.actions.results.api.v1.CacheService/";
 
 	#base;
 	#headers;
@@ -17,13 +18,11 @@ export class CacheClient {
 
 	constructor() {
 		const env = process.env;
-		const url = env.ACTIONS_CACHE_URL;
+		const url = env.ACTIONS_RESULTS_URL;
 		const token = env.ACTIONS_RUNTIME_TOKEN;
 		if (!url || !token || !URL.canParse(url)) {
 			this.#enabled = false;
-			// Outside GHA (local testing) the env vars are absent by design.
-			// Inside GHA they should always be present — warn so misconfig
-			// is visible. Action still works; runs just don't cache.
+			// Outside GHA (local testing) the env vars are absent by design. Inside GHA they should always be present — warn so misconfig is visible. Action still works; runs just don't cache.
 			if (env.GITHUB_ACTIONS) {
 				log.warn(
 					"GHA cache unavailable; runs will re-discover Slack messages each time.",
@@ -31,34 +30,27 @@ export class CacheClient {
 			}
 			return;
 		}
-		// new URL(relative, base) needs a trailing slash on base or it'd
-		// resolve relative as a sibling of the last path segment.
-		this.#base = new URL("_apis/artifactcache/", url.replace(/\/?$/, "/"));
+		// new URL(relative, base) needs a trailing slash on base or it'd resolve relative as a sibling of the last path segment.
+		this.#base = new URL(CacheClient.#SERVICE, url.replace(/\/?$/, "/"));
 		this.#headers = {
 			Authorization: `Bearer ${token}`,
-			Accept: "application/json;api-version=6.0-preview.1",
+			"Content-Type": "application/json",
+			Accept: "application/json",
 		};
 		this.#runKey = `${env.GITHUB_RUN_ID || "norunid"}-${env.GITHUB_RUN_ATTEMPT || "1"}`;
 		this.#enabled = true;
 	}
 
-	#url(path) {
-		return new URL(path, this.#base);
-	}
-
-	#send(url, init) {
-		return fetch(url, {
-			...init,
-			headers: { ...this.#headers, ...init.headers },
-		});
-	}
-
 	async restore(signal) {
 		if (!this.#enabled) return null;
 		try {
-			const meta = await this.#lookup(signal);
-			if (!meta?.archiveLocation) return null;
-			const blob = await fetch(meta.archiveLocation, { signal });
+			const lookup = await this.#twirp("GetCacheEntryDownloadURL", signal, {
+				key: `${CacheClient.#KEY_PREFIX}__sentinel__`,
+				restoreKeys: [CacheClient.#KEY_PREFIX],
+				version: CacheClient.#VERSION,
+			});
+			if (!lookup.ok || !lookup.signedDownloadUrl) return null;
+			const blob = await fetch(lookup.signedDownloadUrl, { signal });
 			if (!blob.ok) throw new Error(`blob fetch ${blob.status}`);
 			return await blob.json();
 		} catch (e) {
@@ -72,64 +64,50 @@ export class CacheClient {
 		if (!this.#enabled) return;
 		try {
 			const body = Buffer.from(JSON.stringify(state), "utf8");
-			const cacheId = await this.#reserve(body.length);
-			await this.#upload(cacheId, body);
-			await this.#commit(cacheId, body.length);
+			const key = `${CacheClient.#KEY_PREFIX}${this.#runKey}`;
+			const reserved = await this.#twirp("CreateCacheEntry", null, {
+				key,
+				version: CacheClient.#VERSION,
+			});
+			if (!reserved.ok || !reserved.signedUploadUrl) {
+				throw new Error("reserve: no signedUploadUrl");
+			}
+			await this.#azurePut(reserved.signedUploadUrl, body);
+			// sizeBytes is proto int64 → JSON string, not number.
+			const finalized = await this.#twirp("FinalizeCacheEntryUpload", null, {
+				key,
+				version: CacheClient.#VERSION,
+				sizeBytes: String(body.length),
+			});
+			if (!finalized.ok) throw new Error("finalize: ok=false");
 		} catch (e) {
 			log.warn(`cache save failed: ${e.message}`);
 		}
 	}
 
-	// Sentinel primary key never matches; the second key is a prefix lookup
-	// against every entry we've saved, returning the most recent one.
-	async #lookup(signal) {
-		const url = this.#url("cache");
-		url.searchParams.set(
-			"keys",
-			`${CacheClient.#KEY_PREFIX}__sentinel__,${CacheClient.#KEY_PREFIX}`,
-		);
-		url.searchParams.set("version", CacheClient.#VERSION);
-		const res = await this.#send(url, { signal });
-		// 204 = no cache entry yet; that's normal "first run", not an error.
-		if (res.status === 204) return null;
-		if (!res.ok) throw new Error(`lookup ${res.status}`);
-		return await res.json();
-	}
-
-	async #reserve(size) {
-		const res = await this.#send(this.#url("caches"), {
+	async #twirp(method, signal, payload) {
+		const res = await fetch(new URL(method, this.#base), {
 			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				key: `${CacheClient.#KEY_PREFIX}${this.#runKey}`,
-				version: CacheClient.#VERSION,
-				cacheSize: size,
-			}),
+			headers: this.#headers,
+			body: JSON.stringify(payload),
+			signal,
 		});
-		if (!res.ok) throw new Error(`reserve ${res.status}`);
-		const cacheId = (await res.json())?.cacheId;
-		if (!cacheId) throw new Error("reserve: no cacheId in response");
-		return cacheId;
+		if (!res.ok) throw new Error(`${method} ${res.status}`);
+		return res.json();
 	}
 
-	async #upload(cacheId, body) {
-		const res = await this.#send(this.#url(`caches/${cacheId}`), {
-			method: "PATCH",
+	// SAS query params are the credential; sending Authorization would 403.
+	async #azurePut(url, body) {
+		const res = await fetch(url, {
+			method: "PUT",
 			headers: {
+				"x-ms-blob-type": "BlockBlob",
+				"x-ms-version": "2020-04-08",
 				"Content-Type": "application/octet-stream",
-				"Content-Range": `bytes 0-${body.length - 1}/*`,
+				"Content-Length": String(body.length),
 			},
 			body,
 		});
 		if (!res.ok) throw new Error(`upload ${res.status}`);
-	}
-
-	async #commit(cacheId, size) {
-		const res = await this.#send(this.#url(`caches/${cacheId}`), {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ size }),
-		});
-		if (!res.ok) throw new Error(`commit ${res.status}`);
 	}
 }

@@ -323,13 +323,13 @@ test("Memo.getOrSet: refetches once the cell's age exceeds the TTL", async () =>
 
 // ---------------------------------------------------------------- CacheClient
 
-test("CacheClient: no-op when ACTIONS_CACHE_URL is missing (outside GHA)", async () => {
+test("CacheClient: no-op when ACTIONS_RESULTS_URL is missing (outside GHA)", async () => {
 	const orig = {
-		url: process.env.ACTIONS_CACHE_URL,
+		url: process.env.ACTIONS_RESULTS_URL,
 		token: process.env.ACTIONS_RUNTIME_TOKEN,
 		gha: process.env.GITHUB_ACTIONS,
 	};
-	delete process.env.ACTIONS_CACHE_URL;
+	delete process.env.ACTIONS_RESULTS_URL;
 	delete process.env.ACTIONS_RUNTIME_TOKEN;
 	delete process.env.GITHUB_ACTIONS;
 	try {
@@ -341,7 +341,7 @@ test("CacheClient: no-op when ACTIONS_CACHE_URL is missing (outside GHA)", async
 		);
 		await cache.save({ memo: {}, prMatches: {} });
 	} finally {
-		if (orig.url !== undefined) process.env.ACTIONS_CACHE_URL = orig.url;
+		if (orig.url !== undefined) process.env.ACTIONS_RESULTS_URL = orig.url;
 		if (orig.token !== undefined)
 			process.env.ACTIONS_RUNTIME_TOKEN = orig.token;
 		if (orig.gha !== undefined) process.env.GITHUB_ACTIONS = orig.gha;
@@ -350,12 +350,12 @@ test("CacheClient: no-op when ACTIONS_CACHE_URL is missing (outside GHA)", async
 
 test("CacheClient: warns when cache is unavailable inside GHA (misconfig)", async () => {
 	const orig = {
-		url: process.env.ACTIONS_CACHE_URL,
+		url: process.env.ACTIONS_RESULTS_URL,
 		token: process.env.ACTIONS_RUNTIME_TOKEN,
 		gha: process.env.GITHUB_ACTIONS,
 		log: console.log,
 	};
-	delete process.env.ACTIONS_CACHE_URL;
+	delete process.env.ACTIONS_RESULTS_URL;
 	delete process.env.ACTIONS_RUNTIME_TOKEN;
 	process.env.GITHUB_ACTIONS = "true";
 	const lines = [];
@@ -366,7 +366,7 @@ test("CacheClient: warns when cache is unavailable inside GHA (misconfig)", asyn
 		assert.match(lines[0], /^::warning::.*cache unavailable/i);
 	} finally {
 		console.log = orig.log;
-		if (orig.url !== undefined) process.env.ACTIONS_CACHE_URL = orig.url;
+		if (orig.url !== undefined) process.env.ACTIONS_RESULTS_URL = orig.url;
 		if (orig.token !== undefined)
 			process.env.ACTIONS_RUNTIME_TOKEN = orig.token;
 		if (orig.gha !== undefined) process.env.GITHUB_ACTIONS = orig.gha;
