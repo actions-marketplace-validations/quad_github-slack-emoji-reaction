@@ -57,11 +57,10 @@ For PR-themed custom emoji (e.g. GitHub's actual review icons), see
 4. **Invite the bot** in each channel where reactions should appear:
    `/invite @github-pr-reactions`. Reactions only appear in member channels.
 
-> ⚠️ **Install in your own workspace; do not submit to the Slack Marketplace** —
-> Marketplace apps hit a Slack rate limit that breaks this action.
-
 ## Limits
 
+- Install the Slack app in your own workspace; do not submit to the Slack
+  Marketplace. Marketplace apps hit a Slack rate limit that breaks this action.
 - Top-level messages only (thread replies aren't scanned).
 - 30-day lookback. PRs whose Slack post is older won't get reactions on
   later state changes.
