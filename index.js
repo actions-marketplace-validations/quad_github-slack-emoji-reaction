@@ -36,11 +36,11 @@ const nowS = () => Math.floor(Date.now() / 1000);
 const input = (name) =>
 	(process.env[`INPUT_${name.toUpperCase()}`] || "").trim();
 
-// JSON.stringify flattens any Slack message shape (text <url>, attachments,
-// blocks) into a string the URL survives literally. \b closes the /pull/12
-// vs /pull/123 substring trap.
 function linksToPR(message, pr) {
 	const target = `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.num}`;
+	// JSON.stringify flattens every Slack message shape (text <url>,
+	// attachments, blocks) into a string the URL survives literally; \b
+	// closes the /pull/12 vs /pull/123 substring trap.
 	return new RegExp(`${RegExp.escape(target)}\\b`).test(
 		JSON.stringify(message),
 	);
