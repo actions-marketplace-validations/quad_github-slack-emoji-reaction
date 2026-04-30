@@ -68,7 +68,7 @@ export class SlackClient {
 	async #callOnce(method, params) {
 		let res;
 		try {
-			res = await this.#fetch(SlackClient.#SLACK_API + method, {
+			res = await this.#fetch(new URL(method, SlackClient.#SLACK_API), {
 				method: "POST",
 				headers: {
 					Authorization: `Bearer ${this.#token}`,
@@ -78,7 +78,7 @@ export class SlackClient {
 				signal: this.#signal,
 			});
 		} catch (e) {
-			if (this.#signal.aborted) throw this.#signal.reason;
+			if (this.#signal.aborted) throw e;
 			throw new NetworkError(e);
 		}
 		const body = await res.json();

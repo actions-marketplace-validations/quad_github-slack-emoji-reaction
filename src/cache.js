@@ -12,8 +12,11 @@ export class CacheClient {
 
 	constructor() {
 		const env = process.env;
-		const rawBase = env.ACTIONS_CACHE_URL || "";
-		this.#base = rawBase.endsWith("/") ? rawBase : rawBase ? `${rawBase}/` : "";
+		const raw = env.ACTIONS_CACHE_URL;
+		// new URL(relative, base) needs base to end in "/" or it'll resolve
+		// the relative as a sibling of the last path segment.
+		const root = raw && new URL(raw.endsWith("/") ? raw : `${raw}/`);
+		this.#base = root && new URL("_apis/artifactcache/", root);
 		this.#token = env.ACTIONS_RUNTIME_TOKEN || "";
 		this.#headers = {
 			Authorization: `Bearer ${this.#token}`,
@@ -24,7 +27,7 @@ export class CacheClient {
 	}
 
 	#url(path) {
-		return new URL(`_apis/artifactcache/${path}`, this.#base);
+		return new URL(path, this.#base);
 	}
 
 	#send(path, init) {
