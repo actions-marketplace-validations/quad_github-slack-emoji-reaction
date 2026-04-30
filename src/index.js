@@ -324,10 +324,6 @@ async function main() {
 	}
 }
 
-function* causeMessages(e) {
-	for (let cur = e; cur; cur = cur.cause) yield cur.message;
-}
-
 if (import.meta.main) {
 	try {
 		await main();
@@ -335,6 +331,9 @@ if (import.meta.main) {
 		if (!(e instanceof FatalError)) throw e;
 		// Walk the cause chain so deep errors surface in the one-line exit
 		// message without dragging in the stack traces console.error(e) prints.
+		const causeMessages = function* (cur) {
+			for (; cur; cur = cur.cause) yield cur.message;
+		};
 		console.error([...causeMessages(e)].join(": "));
 		process.exit(1);
 	}
