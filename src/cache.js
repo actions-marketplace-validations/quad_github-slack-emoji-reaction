@@ -42,8 +42,8 @@ export class CacheClient {
 		return new URL(path, this.#base);
 	}
 
-	#send(path, init) {
-		return fetch(this.#url(path), {
+	#send(url, init = {}) {
+		return fetch(url, {
 			...init,
 			headers: { ...this.#headers, ...(init.headers || {}) },
 		});
@@ -83,12 +83,12 @@ export class CacheClient {
 			`${CacheClient.#KEY_PREFIX}__sentinel__,${CacheClient.#KEY_PREFIX}`,
 		);
 		url.searchParams.set("version", CacheClient.#VERSION);
-		const res = await fetch(url, { headers: this.#headers, signal });
+		const res = await this.#send(url, { signal });
 		return res.ok ? await res.json() : null;
 	}
 
 	async #reserve(size) {
-		const res = await this.#send("caches", {
+		const res = await this.#send(this.#url("caches"), {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
@@ -101,7 +101,7 @@ export class CacheClient {
 	}
 
 	async #upload(cacheId, body) {
-		const res = await this.#send(`caches/${cacheId}`, {
+		const res = await this.#send(this.#url(`caches/${cacheId}`), {
 			method: "PATCH",
 			headers: {
 				"Content-Type": "application/octet-stream",
@@ -113,7 +113,7 @@ export class CacheClient {
 	}
 
 	async #commit(cacheId, size) {
-		await this.#send(`caches/${cacheId}`, {
+		await this.#send(this.#url(`caches/${cacheId}`), {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ size }),
