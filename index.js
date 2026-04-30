@@ -139,12 +139,6 @@ export class AuthError extends FatalError {
 	}
 }
 
-function checkAuth(res) {
-	if (res?.ok === false && AUTH_ERRORS.has(res.error)) {
-		throw new AuthError(res.error);
-	}
-}
-
 export class SlackClient {
 	#token;
 	#fetch;
@@ -204,7 +198,12 @@ export class SlackClient {
 			const isRateLimited =
 				res.status === 429 ||
 				(lastBody?.ok === false && lastBody.error === "ratelimited");
-			if (!isRateLimited) return lastBody;
+			if (!isRateLimited) {
+				if (lastBody?.ok === false && AUTH_ERRORS.has(lastBody.error)) {
+					throw new AuthError(lastBody.error);
+				}
+				return lastBody;
+			}
 
 			const retry = Math.min(
 				parseInt(res.headers.get("retry-after"), 10) || 1,
@@ -401,7 +400,6 @@ export class Memo {
 // concrete I/O; ActionState.memo decides whether to invoke them.
 export async function fetchBotUserId(slack) {
 	const res = await slack.call("auth.test", {});
-	checkAuth(res);
 	if (!res.ok) throw new Error(`auth.test failed: ${res.error}`);
 	return res.user_id;
 }
@@ -417,7 +415,6 @@ export async function fetchChannels(slack) {
 		};
 		if (cursor) params.cursor = cursor;
 		const res = await slack.call("conversations.list", params);
-		checkAuth(res);
 		if (!res.ok) throw new Error(`conversations.list failed: ${res.error}`);
 		for (const c of res.channels) {
 			if (c.is_member) out.push({ id: c.id, name: c.name });
@@ -450,7 +447,6 @@ export async function discoverMatches(slack, pr, channels) {
 			const params = { channel: ch.id, oldest, limit: 200 };
 			if (cursor) params.cursor = cursor;
 			const res = await slack.call("conversations.history", params);
-			checkAuth(res);
 			if (!res.ok) {
 				console.warn(
 					`conversations.history ${ch.id}(${ch.name}): ${res.error}`,
@@ -484,7 +480,6 @@ export async function reactToMatch(ctx, match) {
 			timestamp: match.ts,
 			full: true,
 		});
-		checkAuth(got);
 		if (got.ok) {
 			const opp = got.message?.reactions?.find((r) => r.name === removeEmoji);
 			if (opp?.users.includes(botUserId)) {
@@ -493,7 +488,6 @@ export async function reactToMatch(ctx, match) {
 					timestamp: match.ts,
 					name: removeEmoji,
 				});
-				checkAuth(rm);
 				if (!rm.ok && !TOLERATED_REACTION_ERRORS.has(rm.error)) {
 					console.warn(`reactions.remove ${where} ${removeEmoji}: ${rm.error}`);
 				}
@@ -508,7 +502,6 @@ export async function reactToMatch(ctx, match) {
 		timestamp: match.ts,
 		name: addEmoji,
 	});
-	checkAuth(add);
 	if (!add.ok && !TOLERATED_REACTION_ERRORS.has(add.error)) {
 		console.warn(`reactions.add ${where} ${addEmoji}: ${add.error}`);
 	}
