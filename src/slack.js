@@ -14,31 +14,21 @@ export class SlackClient {
 	#token;
 	#fetch;
 	#apiBase;
-	#paceMs;
 	#maxRetries;
 	#retryAfterCapS;
-	#nextCallAt = 0;
 
 	constructor({
 		token,
 		fetch = globalThis.fetch,
 		apiBase = SlackClient.#SLACK_API,
-		paceMs = 1200,
 		maxRetries = 3,
 		retryAfterCapS = 60,
 	} = {}) {
 		this.#token = token;
 		this.#fetch = fetch;
 		this.#apiBase = apiBase;
-		this.#paceMs = paceMs;
 		this.#maxRetries = maxRetries;
 		this.#retryAfterCapS = retryAfterCapS;
-	}
-
-	async #pace() {
-		const wait = this.#nextCallAt - Date.now();
-		if (wait > 0) await sleep(wait);
-		this.#nextCallAt = Date.now() + this.#paceMs;
 	}
 
 	// Outcome:
@@ -88,7 +78,6 @@ export class SlackClient {
 	async call(method, params) {
 		let outcome;
 		for (let attempt = 0; attempt <= this.#maxRetries; attempt++) {
-			await this.#pace();
 			outcome = await this.#callOnce(method, params);
 			if (outcome.kind === "ok") return outcome.body;
 			const tag = `slack ${method} ${outcome.kind}`;
