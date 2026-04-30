@@ -119,7 +119,7 @@ async function discoverMatches(slack, memo, pr, channels) {
 	const linksToPR = (msg) => linkRe.test(JSON.stringify(msg));
 
 	const matches = [];
-	const oldest = String(Math.floor(Date.now() / 1000) - HISTORY_LOOKBACK_S);
+	const oldest = Math.floor(Date.now() / 1000) - HISTORY_LOOKBACK_S;
 	for (const ch of sample.slice(0, MAX_CHANNELS_PER_RUN)) {
 		for await (const res of slack.paginate(
 			"conversations.history",
