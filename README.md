@@ -16,6 +16,7 @@ Inspired by [jybp/github-slack-emoji-reaction](https://github.com/jybp/github-sl
 3. **Add the workflow** at `.github/workflows/slack-emoji-reactions.yml`:
 
    ```yaml
+   name: Slack Emoji Reactions
    on:
      pull_request:        { types: [closed] }
      pull_request_review: { types: [submitted] }
