@@ -65,38 +65,49 @@ export class SlackClient {
 	async #callOnce(method, params) {
 		let res;
 		try {
-			res = await this.#fetch(new URL(method, SlackClient.#SLACK_API), {
-				method: "POST",
-				headers: {
-					Authorization: `Bearer ${this.#token}`,
-					"Content-Type": "application/json; charset=utf-8",
-				},
-				body: JSON.stringify(params || {}),
-				signal: this.#signal,
-			});
+			res = await this.#sendRequest(method, params);
 		} catch (e) {
 			if (e instanceof DOMException) throw e;
 			throw new NetworkError(method, e);
 		}
 		const body = await res.json();
-		// Slack reports rate limiting two ways: 429 with Retry-After, and
-		// HTTP 200 with `{ok:false, error:"ratelimited"}` plus Retry-After.
+		SlackClient.#enforceRateLimit(res, body);
+		SlackClient.#enforceAuth(body);
+		return body;
+	}
+
+	#sendRequest(method, params) {
+		return this.#fetch(new URL(method, SlackClient.#SLACK_API), {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${this.#token}`,
+				"Content-Type": "application/json; charset=utf-8",
+			},
+			body: JSON.stringify(params || {}),
+			signal: this.#signal,
+		});
+	}
+
+	// Slack reports rate limiting two ways: 429 with Retry-After, and HTTP
+	// 200 with `{ok:false, error:"ratelimited"}` plus Retry-After.
+	static #enforceRateLimit(res, body) {
 		const limited =
 			res.status === 429 ||
 			(body?.ok === false && body.error === "ratelimited");
-		if (limited) {
-			const secs = Math.min(
-				Number(res.headers.get("retry-after")) || 1,
-				SlackClient.#RETRY_AFTER_CAP_S,
-			);
-			throw new RateLimitError(body, Date.now() + secs * 1000);
-		}
+		if (!limited) return;
+		const secs = Math.min(
+			Number(res.headers.get("retry-after")) || 1,
+			SlackClient.#RETRY_AFTER_CAP_S,
+		);
+		throw new RateLimitError(body, Date.now() + secs * 1000);
+	}
+
+	static #enforceAuth(body) {
 		if (body?.ok === false && SlackClient.#AUTH_ERRORS.has(body.error)) {
 			throw new FatalError(
 				`Slack auth error: ${body.error}. Refresh the SLACK_TOKEN secret.`,
 			);
 		}
-		return body;
 	}
 
 	async *paginate(method, baseParams, maxPages) {
