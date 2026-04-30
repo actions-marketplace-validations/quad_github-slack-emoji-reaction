@@ -36,55 +36,15 @@ const nowS = () => Math.floor(Date.now() / 1000);
 const input = (name) =>
 	(process.env[`INPUT_${name.toUpperCase()}`] || "").trim();
 
-function tokenizeAngles(text) {
-	const out = [];
-	let i = 0;
-	while (i < text.length) {
-		const lt = text.indexOf("<", i);
-		if (lt < 0) break;
-		const gt = text.indexOf(">", lt + 1);
-		if (gt < 0) break;
-		let cand = text.slice(lt + 1, gt);
-		const pipe = cand.indexOf("|");
-		if (pipe >= 0) cand = cand.slice(0, pipe);
-		out.push(cand);
-		i = gt + 1;
-	}
-	return out;
-}
-
-function walkForUrls(node) {
-	if (!node || typeof node !== "object") return [];
-	const here = typeof node.url === "string" ? [node.url] : [];
-	return here.concat(...Object.values(node).map(walkForUrls));
-}
-
-function urlsFromMessage(message) {
-	const fromText =
-		typeof message.text === "string" ? tokenizeAngles(message.text) : [];
-	const fromAttachments = (message.attachments || []).flatMap((a) =>
-		[a.title_link, a.from_url].filter((s) => typeof s === "string"),
-	);
-	const fromBlocks = (message.blocks || []).flatMap(walkForUrls);
-	return [...fromText, ...fromAttachments, ...fromBlocks];
-}
-
-// `:num` only consumes up to the next `/`, so /pull/123 matches and
-// /pull/1234 / /pull/123/files don't — the substring trap closed at the parser.
-const PR_URL = new URLPattern({
-	protocol: "https",
-	hostname: "github.com",
-	pathname: "/:owner/:repo/pull/:num",
-});
-
-function matchesPullUrl(pr, candidate) {
-	const g = PR_URL.exec(candidate)?.pathname.groups;
-	return (
-		!!g &&
-		g.owner === pr.owner &&
-		g.repo === pr.repo &&
-		g.num === String(pr.num)
-	);
+// True if the message anywhere contains a link to this PR. Slack message
+// shapes vary (text with <url>, attachments, nested blocks), but the URL
+// always survives JSON.stringify as a literal substring. A digit lookahead
+// closes the /pull/123 vs /pull/1234 substring trap.
+function linksToPR(message, pr) {
+	const target = `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.num}`;
+	const json = JSON.stringify(message);
+	const i = json.indexOf(target);
+	return i >= 0 && !/\d/.test(json[i + target.length] ?? "");
 }
 
 export function deriveStatus(eventName, payload) {
@@ -458,9 +418,7 @@ async function discoverMatches(slack, pr, channels) {
 				);
 				break;
 			}
-			const hit = res.messages.find((msg) =>
-				urlsFromMessage(msg).some((c) => matchesPullUrl(pr, c)),
-			);
+			const hit = res.messages.find((msg) => linksToPR(msg, pr));
 			if (hit) {
 				matches.push({ channel: ch.id, ts: hit.ts });
 				break;

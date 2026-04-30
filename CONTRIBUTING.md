@@ -34,8 +34,9 @@ commit. See `fixtures/SOURCE.md` for the pin and refresh recipe.
 `index.js` is a single file, organized:
 
 - **Constants** — Slack endpoint, status names, error sets, caps and TTLs.
-- **Pure helpers** — `deriveStatus`, `prContext` and module-private URL
-  helpers (`tokenizeAngles`, `urlsFromMessage`, `matchesPullUrl` etc.).
+- **Pure helpers** — `deriveStatus`, `prContext`, and `linksToPR`
+  (substring-scans the message JSON; digit lookahead handles the
+  `/pull/12` vs `/pull/123` trap).
 - **`FatalError`** — operator-fixable errors thrown with pre-built
   messages; caught at the top level. `FatalError.notNull(v, msg)` for
   required-input checks.
