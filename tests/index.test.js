@@ -224,19 +224,19 @@ test("slack.call: 200 + ok:false + error=ratelimited is treated as rate-limit (S
 	assert.equal(calls.length, 2);
 });
 
-test("slack.call: gives up after 3 retries and returns the last 429 body", async () => {
+test("slack.call: gives up after 2 retries and returns the last 429 body", async () => {
 	const ratelimited = {
 		status: 429,
 		headers: { "retry-after": "1" },
 		body: { ok: false, error: "ratelimited" },
 	};
 	const { slack, calls } = slackFor({
-		"auth.test": [ratelimited, ratelimited, ratelimited, ratelimited],
+		"auth.test": [ratelimited, ratelimited, ratelimited],
 	});
 	const res = await slack.call("auth.test", {});
 	assert.equal(res.ok, false);
 	assert.equal(res.error, "ratelimited");
-	assert.equal(calls.length, 4);
+	assert.equal(calls.length, 3);
 });
 
 test("slack.call: invalid_auth response is thrown as FatalError", async () => {

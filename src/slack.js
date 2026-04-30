@@ -21,7 +21,7 @@ export class SlackClient {
 		token,
 		fetch = globalThis.fetch,
 		apiBase = SlackClient.#SLACK_API,
-		maxRetries = 3,
+		maxRetries = 2,
 		retryAfterCapS = 60,
 	} = {}) {
 		this.#token = token;
