@@ -15,10 +15,8 @@ const FLIP_OPPOSITE = {
 	[STATUS_CHANGES_REQUESTED]: STATUS_APPROVED,
 };
 
-// Errors that indicate our cached channel list is stale (bot was removed
-// from the channel, or the channel was archived since we last refreshed).
-// We can't /leave — Slack's already told us we're effectively out — but
-// we can drop the channel cache so the next run refetches.
+// Slack's already told us we're effectively out; drop the channel cache
+// so the next run refetches.
 const STALE_CHANNEL_ERRORS = new Set([
 	"channel_not_found",
 	"not_in_channel",
@@ -119,8 +117,7 @@ async function discoverMatches(slack, memo, pr, channels) {
 	return matches;
 }
 
-// One run's worth of reaction work; bundles the deps that would otherwise
-// thread through every step.
+// One run's worth of reaction work
 export class Reactor {
 	static #STALE_MATCH_ERRORS = new Set([
 		"not_in_channel",
@@ -299,7 +296,6 @@ async function main() {
 	if (!job) return;
 	console.log(`::add-mask::${job.token}`);
 
-	// finally still saves whatever progress made it before any abort.
 	const deadline = AbortSignal.timeout(RUN_DEADLINE_MS);
 	const slack = new SlackClient({
 		token: job.token,
@@ -326,11 +322,11 @@ if (import.meta.main) {
 		await main();
 	} catch (e) {
 		if (!(e instanceof FatalError)) throw e;
-		// Walk the cause chain so deep errors surface in the one-line exit
-		// message without dragging in the stack traces console.error(e) prints.
+
 		const parts = [];
 		for (let cur = e; cur; cur = cur.cause) parts.push(cur.message);
 		console.error(parts.join(": "));
+
 		process.exit(1);
 	}
 }

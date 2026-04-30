@@ -13,8 +13,6 @@ export class CacheClient {
 	constructor() {
 		const env = process.env;
 		const raw = env.ACTIONS_CACHE_URL;
-		// new URL(relative, base) needs base to end in "/" or it'll resolve
-		// the relative as a sibling of the last path segment.
 		const root = raw && new URL(raw.endsWith("/") ? raw : `${raw}/`);
 		this.#base = root && new URL("_apis/artifactcache/", root);
 		this.#token = env.ACTIONS_RUNTIME_TOKEN || "";
@@ -37,9 +35,6 @@ export class CacheClient {
 		});
 	}
 
-	// Failures are silent: action proceeds with empty state, performance
-	// degrades, but nothing externally-visible breaks. GHA cache hiccups
-	// aren't operator-actionable.
 	async restore(signal) {
 		if (!this.#enabled) return null;
 		try {

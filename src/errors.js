@@ -5,6 +5,7 @@ export class FatalError extends Error {
 		if (!value) throw new FatalError(message);
 		return value;
 	}
+
 	static fromSlack(method, body) {
 		return new FatalError(`Slack ${method} failed: ${body.error}`);
 	}

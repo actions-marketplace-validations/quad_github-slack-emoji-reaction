@@ -1,17 +1,12 @@
 import { retry } from "./async.js";
 import { FatalError } from "./errors.js";
 
-// Fetch-level failure (DNS, TCP, etc.). FatalError so retry-exhausted
-// network failures propagate to main()'s top-level catch with a clean
-// message + cause chain.
 class NetworkError extends FatalError {
 	constructor(method, cause) {
 		super(`Slack ${method} failed`, { cause });
 	}
 }
 
-// 429 / ok:false ratelimited. Carries the body for call()'s catch to
-// surface on retry exhaustion, plus the retry-after deadline.
 class RateLimitError extends Error {
 	constructor(body, deadlineMs) {
 		super();
@@ -55,8 +50,6 @@ export class SlackClient {
 						: Date.now() + SlackClient.#networkBackoffMs(),
 			});
 		} catch (e) {
-			// Rate-limit exhausted → surface body; callers read .ok/.error.
-			// Auth, abort, network errors propagate as FatalError.
 			if (e instanceof RateLimitError) return e.body;
 			throw e;
 		}
@@ -88,11 +81,6 @@ export class SlackClient {
 		});
 	}
 
-	// Slack reports rate limiting two ways: 429 with Retry-After, and HTTP
-	// 200 with `{ok:false, error:"ratelimited"}` plus Retry-After. If the
-	// requested wait exceeds our patience threshold, give up and let the
-	// next workflow run pick this up — disrespecting Retry-After would
-	// just earn another 429.
 	static #enforceRateLimit(method, res, body) {
 		const limited =
 			res.status === 429 ||
@@ -101,7 +89,7 @@ export class SlackClient {
 		const secs = Number(res.headers.get("retry-after")) || 1;
 		if (secs > SlackClient.#RETRY_AFTER_CAP_S) {
 			throw new FatalError(
-				`Slack ${method} rate limit too long: ${secs}s exceeds ${SlackClient.#RETRY_AFTER_CAP_S}s; retry later`,
+				`Slack ${method} rate limit too long: ${secs}s exceeds ${SlackClient.#RETRY_AFTER_CAP_S}s; giving up`,
 			);
 		}
 		throw new RateLimitError(body, Date.now() + secs * 1000);
@@ -129,9 +117,6 @@ export class SlackClient {
 		}
 	}
 
-	// Half jitter on the network retry: uniformly distributed over
-	// [base, 2*base) so concurrent runs hit Slack on staggered schedules.
-	// Slack's Retry-After is server-driven; we don't jitter that path.
 	static #networkBackoffMs() {
 		const base = SlackClient.#NETWORK_RETRY_MS;
 		return base + Math.random() * base;

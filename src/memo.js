@@ -1,7 +1,5 @@
 const nowS = () => Math.floor(Date.now() / 1000);
 
-// Keyed map of { value, refreshedAt } cells. Plain reads/writes plus
-// TTL-aware memoization (ensure), stale-sweep, and oldest-first cap.
 export class Memo {
 	#cells;
 
@@ -31,7 +29,6 @@ export class Memo {
 		return value;
 	}
 
-	// Eviction strategy: drop entries last refreshed more than `ttlS` ago.
 	evictOlderThan(ttlS) {
 		const cutoff = nowS() - ttlS;
 		this.#cells = Object.fromEntries(
