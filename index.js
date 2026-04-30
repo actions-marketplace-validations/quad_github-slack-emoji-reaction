@@ -38,13 +38,12 @@ const input = (name) =>
 
 // True if the message anywhere contains a link to this PR. Slack message
 // shapes vary (text with <url>, attachments, nested blocks), but the URL
-// always survives JSON.stringify as a literal substring. A digit lookahead
-// closes the /pull/123 vs /pull/1234 substring trap.
+// always survives JSON.stringify as a literal substring. The trailing `\b`
+// closes the /pull/12 vs /pull/123 substring trap.
 function linksToPR(message, pr) {
 	const target = `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.num}`;
-	const json = JSON.stringify(message);
-	const i = json.indexOf(target);
-	return i >= 0 && !/\d/.test(json[i + target.length] ?? "");
+	const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`${escaped}\\b`).test(JSON.stringify(message));
 }
 
 export function deriveStatus(eventName, payload) {
