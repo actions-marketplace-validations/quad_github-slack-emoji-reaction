@@ -201,7 +201,7 @@ export class SlackClient {
 			(body?.ok === false && body.error === "ratelimited");
 		if (rateLimited) {
 			const secs = Math.min(
-				parseInt(res.headers.get("retry-after"), 10) || 1,
+				Number(res.headers.get("retry-after")) || 1,
 				this.#retryAfterCapS,
 			);
 			return { kind: "ratelimited", waitMs: secs * 1000, body };
@@ -568,7 +568,7 @@ function readJob() {
 		token,
 		addEmoji,
 		removeEmoji: opposite ? input(`emoji-${opposite}`) : "",
-		isRerun: parseInt(process.env.GITHUB_RUN_ATTEMPT, 10) > 1,
+		isRerun: Number(process.env.GITHUB_RUN_ATTEMPT) > 1,
 		pr,
 		prKey: `${pr.owner}/${pr.repo}#${pr.num}`,
 	};
