@@ -40,15 +40,7 @@ export class SlackClient {
 	async #callOnce(method, params) {
 		let res;
 		try {
-			res = await this.#fetch(SlackClient.#SLACK_API + method, {
-				method: "POST",
-				headers: {
-					Authorization: `Bearer ${this.#token}`,
-					"Content-Type": "application/json; charset=utf-8",
-				},
-				body: JSON.stringify(params || {}),
-				signal: this.#signal,
-			});
+			res = await this.#sendRequest(method, params);
 		} catch (e) {
 			if (this.#signal.aborted) throw this.#signal.reason;
 			return {
@@ -58,24 +50,44 @@ export class SlackClient {
 			};
 		}
 		const body = await res.json();
-		// Slack reports rate limiting two ways: 429 with Retry-After, and
-		// HTTP 200 with `{ok:false, error:"ratelimited"}` plus Retry-After.
-		const rateLimited =
+		const rateLimit = this.#asRateLimit(res, body);
+		if (rateLimit) return rateLimit;
+		this.#throwIfAuthError(body);
+		return { kind: "ok", body };
+	}
+
+	#sendRequest(method, params) {
+		return this.#fetch(SlackClient.#SLACK_API + method, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${this.#token}`,
+				"Content-Type": "application/json; charset=utf-8",
+			},
+			body: JSON.stringify(params || {}),
+			signal: this.#signal,
+		});
+	}
+
+	// Slack reports rate limiting two ways: 429 with Retry-After, and HTTP
+	// 200 with `{ok:false, error:"ratelimited"}` plus Retry-After.
+	#asRateLimit(res, body) {
+		const isLimited =
 			res.status === 429 ||
 			(body?.ok === false && body.error === "ratelimited");
-		if (rateLimited) {
-			const secs = Math.min(
-				Number(res.headers.get("retry-after")) || 1,
-				SlackClient.#RETRY_AFTER_CAP_S,
-			);
-			return { kind: "ratelimited", waitMs: secs * 1000, body };
-		}
+		if (!isLimited) return null;
+		const secs = Math.min(
+			Number(res.headers.get("retry-after")) || 1,
+			SlackClient.#RETRY_AFTER_CAP_S,
+		);
+		return { kind: "ratelimited", waitMs: secs * 1000, body };
+	}
+
+	#throwIfAuthError(body) {
 		if (body?.ok === false && SlackClient.#AUTH_ERRORS.has(body.error)) {
 			throw new FatalError(
 				`Slack auth error: ${body.error}. Refresh the SLACK_TOKEN secret.`,
 			);
 		}
-		return { kind: "ok", body };
 	}
 
 	async call(method, params) {
@@ -84,17 +96,20 @@ export class SlackClient {
 			this.#signal.throwIfAborted();
 			outcome = await this.#callOnce(method, params);
 			if (outcome.kind === "ok") return outcome.body;
-			const tag = `slack ${method} ${outcome.kind}`;
-			const where = `(attempt ${attempt + 1}/${SlackClient.#MAX_RETRIES + 1})`;
-			console.warn(
-				outcome.kind === "network"
-					? `${tag}: ${outcome.body.message} ${where}`
-					: `${tag}; retry-after ${outcome.waitMs / 1000}s ${where}`,
-			);
+			console.warn(this.#retryMessage(method, outcome, attempt));
 			if (attempt >= SlackClient.#MAX_RETRIES) break;
 			await sleep(outcome.waitMs, this.#signal);
 		}
 		return outcome.body;
+	}
+
+	#retryMessage(method, outcome, attempt) {
+		const where = `(attempt ${attempt + 1}/${SlackClient.#MAX_RETRIES + 1})`;
+		const detail =
+			outcome.kind === "network"
+				? `: ${outcome.body.message}`
+				: `; retry-after ${outcome.waitMs / 1000}s`;
+		return `slack ${method} ${outcome.kind}${detail} ${where}`;
 	}
 
 	async *paginate(method, baseParams, maxPages) {
