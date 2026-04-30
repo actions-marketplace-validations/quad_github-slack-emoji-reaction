@@ -24,7 +24,6 @@ test("act: pull_request closed reaches auth and exits with AuthError message", a
 			"fixtures/upstream/pull_request/closed.payload.json",
 			"-s",
 			"SLACK_TOKEN=xoxb-fake-token-for-integration-tests",
-			"--pull=false",
 			"-P",
 			"ubuntu-latest=catthehacker/ubuntu:act-latest",
 		],
