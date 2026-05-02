@@ -53,11 +53,13 @@ async function fetchChannels(slack) {
 
 // JSON.stringify flattens every Slack message shape (text <url>, attachments,
 // blocks) into a string the URL survives literally; \b closes the /pull/12
-// vs /pull/123 substring trap.
+// vs /pull/123 substring trap. `root` is excluded so a thread_broadcast
+// doesn't false-match on the parent's content embedded under it.
 function linksTo(pr) {
 	const target = `https://github.com/${pr.owner}/${pr.repo}/pull/${pr.num}`;
 	const re = new RegExp(`${RegExp.escape(target)}\\b`);
-	return (msg) => re.test(JSON.stringify(msg));
+	return (msg) =>
+		re.test(JSON.stringify(msg, (k, v) => (k === "root" ? undefined : v)));
 }
 
 function shuffle(arr) {
@@ -93,7 +95,10 @@ async function discoverMatches(slack, memo, pr, channels) {
 			}
 			const hit = res.messages.find(linksToPR);
 			if (hit) {
-				matches.push({ channel: ch.id, ts: hit.ts });
+				// thread_broadcast appears as a top-level history entry but its
+				// "real" message is the thread parent — react there.
+				const ts = hit.subtype === "thread_broadcast" ? hit.thread_ts : hit.ts;
+				matches.push({ channel: ch.id, ts });
 				break;
 			}
 		}

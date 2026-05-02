@@ -709,3 +709,47 @@ test("run: discovery extracts PR URL from message blocks (not just text)", async
 	await run();
 	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "1.5" }]);
 });
+
+test("run: discovery skips thread_broadcast and targets the thread parent", async (t) => {
+	// conversations.history returns newest-first, so the broadcast appears
+	// before its parent. Slack embeds the parent under `root`, so a naive
+	// stringify would match the broadcast's ts. The reaction belongs on the
+	// parent (thread_ts).
+	const broadcast = {
+		ts: "2.0",
+		thread_ts: "1.0",
+		subtype: "thread_broadcast",
+		text: "I am bypassing and merging this directly.",
+		root: {
+			ts: "1.0",
+			text: "see <https://github.com/octo/hello/pull/42>",
+		},
+	};
+	const parent = {
+		ts: "1.0",
+		text: "see <https://github.com/octo/hello/pull/42>",
+	};
+	const { slack } = slackFor(t, {
+		"conversations.list": [
+			{
+				body: {
+					ok: true,
+					channels: [{ id: "C1", name: "general", is_member: true }],
+					response_metadata: { next_cursor: "" },
+				},
+			},
+		],
+		"conversations.history": [
+			{ body: { ok: true, messages: [broadcast, parent], has_more: false } },
+		],
+		"reactions.get": [reactionsGetWith([])],
+		"reactions.add": [{ body: { ok: true } }],
+	});
+	const { run, prMatches, prKey } = setupRun({
+		slack,
+		job: { desired: new Set(["x"]), managed: new Set(["x"]) },
+		cached: null,
+	});
+	await run();
+	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "1.0" }]);
+});
