@@ -51,9 +51,10 @@ export class CacheClient {
 				restoreKeys: [CacheClient.#KEY_PREFIX],
 				version: CacheClient.#VERSION,
 			});
-			// proto3 JSON omits default values, so `ok: true` may not appear in the response — rely on the URL's presence as the success signal.
-			if (!lookup.signedDownloadUrl) return null;
-			const blob = await fetch(lookup.signedDownloadUrl, { signal });
+			// The Twirp server emits proto3 JSON with use_proto_names=true, so fields are snake_case on the wire (`signed_download_url`, not `signedDownloadUrl`). `ok` is omitted when false (proto3 default), so URL presence is the success signal.
+			const url = lookup.signed_download_url;
+			if (!url) return null;
+			const blob = await fetch(url, { signal });
 			if (!blob.ok) throw new Error(`blob fetch ${blob.status}`);
 			return await blob.json();
 		} catch (e) {
@@ -72,10 +73,10 @@ export class CacheClient {
 				key,
 				version: CacheClient.#VERSION,
 			});
-			if (!reserved.signedUploadUrl) {
+			if (!reserved.signed_upload_url) {
 				throw new Error(`reserve: ${JSON.stringify(reserved)}`);
 			}
-			await this.#azurePut(reserved.signedUploadUrl, body);
+			await this.#azurePut(reserved.signed_upload_url, body);
 			// sizeBytes is proto int64 → JSON string, not number. #twirp throws on non-2xx, which is the real success signal — proto3 JSON would omit `ok: true` from the body.
 			await this.#twirp("FinalizeCacheEntryUpload", null, {
 				key,
