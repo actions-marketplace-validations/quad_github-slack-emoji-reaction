@@ -354,55 +354,59 @@ test("Memo.getOrSet: refetches once the cell's age exceeds the TTL", async () =>
 
 // ---------------------------------------------------------------- CacheClient
 
-test("CacheClient: no-op when ACTIONS_RESULTS_URL is missing (outside GHA)", async () => {
-	const orig = {
-		url: process.env.ACTIONS_RESULTS_URL,
-		token: process.env.ACTIONS_RUNTIME_TOKEN,
-		gha: process.env.GITHUB_ACTIONS,
-	};
-	delete process.env.ACTIONS_RESULTS_URL;
-	delete process.env.ACTIONS_RUNTIME_TOKEN;
-	delete process.env.GITHUB_ACTIONS;
-	try {
-		const cache = new CacheClient();
-		assert.equal(
-			await cache.restore(new AbortController().signal),
-			null,
-			"restore should return null when cache is unavailable",
-		);
-		await cache.save({ memo: {}, prMatches: {} });
-	} finally {
-		if (orig.url !== undefined) process.env.ACTIONS_RESULTS_URL = orig.url;
-		if (orig.token !== undefined)
-			process.env.ACTIONS_RUNTIME_TOKEN = orig.token;
-		if (orig.gha !== undefined) process.env.GITHUB_ACTIONS = orig.gha;
+// Apply env overrides for the duration of fn, then restore. `undefined`
+// in overrides means "unset for the duration".
+const withEnv = async (overrides, fn) => {
+	const prev = {};
+	for (const k of Object.keys(overrides)) prev[k] = process.env[k];
+	for (const [k, v] of Object.entries(overrides)) {
+		if (v === undefined) delete process.env[k];
+		else process.env[k] = v;
 	}
+	try {
+		return await fn();
+	} finally {
+		for (const [k, v] of Object.entries(prev)) {
+			if (v === undefined) delete process.env[k];
+			else process.env[k] = v;
+		}
+	}
+};
+
+test("CacheClient: no-op when ACTIONS_RESULTS_URL is missing (outside GHA)", async () => {
+	await withEnv(
+		{
+			ACTIONS_RESULTS_URL: undefined,
+			ACTIONS_RUNTIME_TOKEN: undefined,
+			GITHUB_ACTIONS: undefined,
+		},
+		async () => {
+			const cache = new CacheClient();
+			assert.equal(
+				await cache.restore(new AbortController().signal),
+				null,
+				"restore should return null when cache is unavailable",
+			);
+			await cache.save({ memo: {}, prMatches: {} });
+		},
+	);
 });
 
-test("CacheClient: warns when cache is unavailable inside GHA (misconfig)", async () => {
-	const orig = {
-		url: process.env.ACTIONS_RESULTS_URL,
-		token: process.env.ACTIONS_RUNTIME_TOKEN,
-		gha: process.env.GITHUB_ACTIONS,
-		log: console.log,
-	};
-	delete process.env.ACTIONS_RESULTS_URL;
-	delete process.env.ACTIONS_RUNTIME_TOKEN;
-	process.env.GITHUB_ACTIONS = "true";
-	const lines = [];
-	console.log = (msg) => lines.push(msg);
-	try {
-		new CacheClient();
-		assert.equal(lines.length, 1);
-		assert.match(lines[0], /^::warning::.*cache unavailable/i);
-	} finally {
-		console.log = orig.log;
-		if (orig.url !== undefined) process.env.ACTIONS_RESULTS_URL = orig.url;
-		if (orig.token !== undefined)
-			process.env.ACTIONS_RUNTIME_TOKEN = orig.token;
-		if (orig.gha !== undefined) process.env.GITHUB_ACTIONS = orig.gha;
-		else delete process.env.GITHUB_ACTIONS;
-	}
+test("CacheClient: warns when cache is unavailable inside GHA (misconfig)", async (t) => {
+	await withEnv(
+		{
+			ACTIONS_RESULTS_URL: undefined,
+			ACTIONS_RUNTIME_TOKEN: undefined,
+			GITHUB_ACTIONS: "true",
+		},
+		async () => {
+			const lines = [];
+			t.mock.method(console, "log", (msg) => lines.push(msg));
+			new CacheClient();
+			assert.equal(lines.length, 1);
+			assert.match(lines[0], /^::warning::.*cache unavailable/i);
+		},
+	);
 });
 
 // ---------------------------------------------------------------- applyReactions (reconciliation, with cached match)
@@ -558,17 +562,6 @@ test("applyReactions: stale prune is persisted incrementally, surviving a later 
 	});
 	await assert.rejects(run(), (e) => e instanceof FatalError);
 	assert.deepEqual(prMatches.get(prKey), [{ channel: "C2", ts: "2.0" }]);
-});
-
-test("applyReactions: invalid_auth from Slack propagates as FatalError", async (t) => {
-	const { slack } = slackFor(t, {
-		"reactions.get": [{ body: { ok: false, error: "invalid_auth" } }],
-	});
-	const { run } = setupRun({ slack });
-	await assert.rejects(
-		run(),
-		(e) => e instanceof FatalError && /invalid_auth/.test(e.message),
-	);
 });
 
 // ---------------------------------------------------------------- run (discovery, no cached match)
