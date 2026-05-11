@@ -95,10 +95,11 @@ async function discoverMatches(slack, memo, pr, channels) {
 			}
 			const hit = res.messages.find(linksToPR);
 			if (hit) {
-				// thread_broadcast appears as a top-level history entry but its
-				// "real" message is the thread parent — react there.
-				const ts = hit.subtype === "thread_broadcast" ? hit.thread_ts : hit.ts;
-				matches.push({ channel: ch.id, ts });
+				// React on hit.ts even when hit is a thread_broadcast: with
+				// `root` excluded from matching, a broadcast only hits when its
+				// own content links to the PR, and that broadcast is what users
+				// see in-channel — the reaction belongs there, not on the parent.
+				matches.push({ channel: ch.id, ts: hit.ts });
 				break;
 			}
 		}

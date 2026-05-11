@@ -710,11 +710,11 @@ test("run: discovery extracts PR URL from message blocks (not just text)", async
 	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "1.5" }]);
 });
 
-test("run: discovery skips thread_broadcast and targets the thread parent", async (t) => {
+test("run: thread_broadcast inheriting parent's PR link → react on parent", async (t) => {
 	// conversations.history returns newest-first, so the broadcast appears
 	// before its parent. Slack embeds the parent under `root`, so a naive
 	// stringify would match the broadcast's ts. The reaction belongs on the
-	// parent (thread_ts).
+	// parent.
 	const broadcast = {
 		ts: "2.0",
 		thread_ts: "1.0",
@@ -752,4 +752,44 @@ test("run: discovery skips thread_broadcast and targets the thread parent", asyn
 	});
 	await run();
 	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "1.0" }]);
+});
+
+test("run: thread_broadcast carrying its own PR link → react on broadcast", async (t) => {
+	// Mirror case: the broadcast (the "Also send to channel" reply users see
+	// in-channel) is the message that links to the PR; the parent is just
+	// thread context. Reaction belongs on the broadcast, not the parent.
+	const parent = {
+		ts: "1.0",
+		text: "questions about the migration — see thread",
+	};
+	const broadcast = {
+		ts: "2.0",
+		thread_ts: "1.0",
+		subtype: "thread_broadcast",
+		text: "PR is up: <https://github.com/octo/hello/pull/42>",
+		root: parent,
+	};
+	const { slack } = slackFor(t, {
+		"conversations.list": [
+			{
+				body: {
+					ok: true,
+					channels: [{ id: "C1", name: "general", is_member: true }],
+					response_metadata: { next_cursor: "" },
+				},
+			},
+		],
+		"conversations.history": [
+			{ body: { ok: true, messages: [broadcast, parent], has_more: false } },
+		],
+		"reactions.get": [reactionsGetWith([])],
+		"reactions.add": [{ body: { ok: true } }],
+	});
+	const { run, prMatches, prKey } = setupRun({
+		slack,
+		job: { desired: new Set(["x"]), managed: new Set(["x"]) },
+		cached: null,
+	});
+	await run();
+	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "2.0" }]);
 });
