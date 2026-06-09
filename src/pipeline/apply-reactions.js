@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: MIT
-const BOT_USER_ID_TTL_S = 30 * 24 * 3600;
 const REACTIONS_PER_RUN_CAP = 50;
 
 const STALE_MATCH_ERRORS = new Set([
@@ -11,26 +10,22 @@ const GET_IGNORE = [...STALE_MATCH_ERRORS];
 const ADD_IGNORE = [...STALE_MATCH_ERRORS, "already_reacted"];
 const REMOVE_IGNORE = [...STALE_MATCH_ERRORS, "no_reaction"];
 
-export async function applyReactions(slack, memo, prMatches, job, matches) {
+export async function applyReactions(slack, state, job, matches) {
 	const stale = new Set();
 	for (const m of matches.slice(0, REACTIONS_PER_RUN_CAP)) {
-		const result = await reconcileMatch(slack, memo, job, m);
+		const result = await reconcileMatch(slack, state, job, m);
 		if (STALE_MATCH_ERRORS.has(result.error)) {
 			stale.add(m);
-			prMatches.set(
-				job.prKey,
-				matches.filter((x) => !stale.has(x)),
-			);
+			state.setLinks(job.prKey, matches.filter((x) => !stale.has(x)));
 		}
 	}
-	// Terminal events (closed/merged) are the last in the PR's lifecycle;
-	// drop the entry now rather than wait for the stale-TTL sweep.
-	if (job.closesPR || matches.every((m) => stale.has(m))) {
-		prMatches.delete(job.prKey);
+	// Drop immediately on close/merge rather than wait for TTL expiry.
+	if (job.closesPR || (stale.size > 0 && stale.size === matches.length)) {
+		state.deleteLinks(job.prKey);
 	}
 }
 
-async function reconcileMatch(slack, memo, job, match) {
+async function reconcileMatch(slack, state, job, match) {
 	const got = await slack.call("reactions.get", {
 		params: { channel: match.channel, timestamp: match.ts, full: true },
 		ignoreErrors: GET_IGNORE,
@@ -39,7 +34,7 @@ async function reconcileMatch(slack, memo, job, match) {
 
 	const botOwned = await botOwnedManaged(
 		slack,
-		memo,
+		state,
 		job.managed,
 		got.message.reactions ?? [],
 	);
@@ -53,12 +48,10 @@ async function reconcileMatch(slack, memo, job, match) {
 	return results.find((r) => STALE_MATCH_ERRORS.has(r.error)) ?? { ok: true };
 }
 
-async function botOwnedManaged(slack, memo, managed, reactions) {
+async function botOwnedManaged(slack, state, managed, reactions) {
 	const ours = reactions.filter((r) => managed.has(r.name));
 	if (ours.length === 0) return new Set();
-	const botUserId = await memo.getOrSet("botUserId", BOT_USER_ID_TTL_S, () =>
-		fetchBotUserId(slack),
-	);
+	const botUserId = await state.getBotUserId(() => fetchBotUserId(slack));
 	return new Set(
 		ours.filter((r) => r.users.includes(botUserId)).map((r) => r.name),
 	);

@@ -16,6 +16,11 @@ export class Memo {
 		this.#cells[key] = { value, refreshedAt: nowS() };
 	}
 
+	touch(key) {
+		const cell = this.#cells[key];
+		if (cell) cell.refreshedAt = nowS();
+	}
+
 	delete(key) {
 		delete this.#cells[key];
 	}
