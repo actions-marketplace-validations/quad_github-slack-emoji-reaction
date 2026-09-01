@@ -57,6 +57,9 @@ export async function fetchPRState(github, pr) {
 	};
 }
 
+export const prKey = (pr) =>
+	`https://github.com/${pr.owner}/${pr.repo}/pull/${pr.num}`;
+
 export function prContext(payload) {
 	const pr = payload.pull_request;
 	const owner = pr?.base?.repo?.owner?.login;
@@ -105,6 +108,6 @@ export function readJob() {
 		githubToken,
 		cfg,
 		pr,
-		prKey: `${pr.owner}/${pr.repo}#${pr.num}`,
+		prKey: prKey(pr),
 	};
 }

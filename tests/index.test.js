@@ -7,6 +7,7 @@ import { CacheClient } from "../src/cache.js";
 import { FatalError } from "../src/errors.js";
 import { GitHubClient } from "../src/github.js";
 import { Memo } from "../src/memo.js";
+import { State } from "../src/state.js";
 import { applyReactions } from "../src/pipeline/apply-reactions.js";
 import { findMatches } from "../src/pipeline/find-matches.js";
 import { desiredEmojis, fetchPRState, prContext } from "../src/pipeline/job.js";
@@ -230,19 +231,24 @@ const slackFor = (t, scripts) => {
 
 // Wires up findMatches+applyReactions for end-to-end run tests. By default
 // seeds a cached match so the run skips discovery — callers exercising the
-// discovery path pass `cached: null`. Returns prMatches so tests can observe
+// discovery path pass `cached: null`. Returns state so tests can observe
 // outcomes.
 const setupRun = ({
 	slack,
 	job = {},
 	botUserId = "U0BOT",
 	cached = [{ channel: "C1", ts: "1.0" }],
+	cursors = null,
+	noChannelCache = false,
 }) => {
-	const memo = new Memo({});
-	if (botUserId) memo.set("botUserId", botUserId);
-	const prKey = "octo/hello#42";
-	const prMatches = new Memo({});
-	if (cached) prMatches.set(prKey, cached);
+	const state = new State();
+	if (botUserId) state.setBotUserId(botUserId);
+	// Empty channel list makes ingest a no-op for reaction-focused tests.
+	if (cached !== null && !noChannelCache) state.setChannels([]);
+	if (cursors !== null)
+		for (const [id, ts] of Object.entries(cursors)) state.setCursor(id, ts);
+	const prKey = "https://github.com/octo/hello/pull/42";
+	if (cached) state.setLinks(prKey, cached);
 	const fullJob = {
 		desired: new Set(["eyes"]),
 		managed: new Set(["eyes"]),
@@ -252,10 +258,10 @@ const setupRun = ({
 		...job,
 	};
 	const run = async () => {
-		const matches = await findMatches(slack, memo, prMatches, fullJob);
-		await applyReactions(slack, memo, prMatches, fullJob, matches);
+		const matches = await findMatches(slack, state, fullJob);
+		await applyReactions(slack, state, fullJob, matches);
 	};
-	return { run, prMatches, prKey };
+	return { run, state, prKey, fullJob };
 };
 
 // ---------------------------------------------------------------- SlackClient.call
@@ -523,7 +529,7 @@ test("applyReactions: tolerated reaction errors (already_reacted) keep the match
 		"reactions.get": [reactionsGetWith([])],
 		"reactions.add": [{ body: { ok: false, error: "already_reacted" } }],
 	});
-	const { run, prMatches, prKey } = setupRun({
+	const { run, state, prKey } = setupRun({
 		slack,
 		job: {
 			desired: new Set(["large_purple_square"]),
@@ -531,16 +537,41 @@ test("applyReactions: tolerated reaction errors (already_reacted) keep the match
 		},
 	});
 	await run();
-	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "1.0" }]);
+	assert.deepEqual(state.getLinks(prKey), [{ channel: "C1", ts: "1.0" }]);
 });
 
 test("applyReactions: stale-match errors (channel_not_found) prune the entry from cache", async (t) => {
 	const { slack } = slackFor(t, {
 		"reactions.get": [{ body: { ok: false, error: "channel_not_found" } }],
 	});
-	const { run, prMatches, prKey } = setupRun({ slack });
+	const { run, state, prKey } = setupRun({ slack });
 	await run();
-	assert.equal(prMatches.get(prKey), undefined);
+	assert.equal(state.getLinks(prKey), undefined);
+});
+
+test("applyReactions: closesPR deletes the entry after applying reactions", async (t) => {
+	const { slack, calls } = slackFor(t, {
+		"reactions.get": [reactionsGetWith([])],
+		"reactions.add": [{ body: { ok: true } }],
+	});
+	const { run, state, prKey } = setupRun({
+		slack,
+		job: { desired: new Set(["rocket"]), managed: new Set(["rocket"]), closesPR: true },
+	});
+	await run();
+	assert.equal(calls.filter((c) => c.method === "reactions.add").length, 1);
+	assert.equal(state.getLinks(prKey), undefined);
+});
+
+test("applyReactions: closesPR with empty match list deletes the sentinel entry", async (t) => {
+	const { slack } = slackFor(t, {});
+	const { run, state, prKey } = setupRun({
+		slack,
+		cached: [],
+		job: { closesPR: true },
+	});
+	await run();
+	assert.equal(state.getLinks(prKey), undefined);
 });
 
 test("applyReactions: stale prune is persisted incrementally, surviving a later throw", async (t) => {
@@ -553,7 +584,7 @@ test("applyReactions: stale prune is persisted incrementally, surviving a later 
 			{ body: { ok: false, error: "invalid_auth" } },
 		],
 	});
-	const { run, prMatches, prKey } = setupRun({
+	const { run, state, prKey } = setupRun({
 		slack,
 		cached: [
 			{ channel: "C1", ts: "1.0" },
@@ -561,7 +592,7 @@ test("applyReactions: stale prune is persisted incrementally, surviving a later 
 		],
 	});
 	await assert.rejects(run(), (e) => e instanceof FatalError);
-	assert.deepEqual(prMatches.get(prKey), [{ channel: "C2", ts: "2.0" }]);
+	assert.deepEqual(state.getLinks(prKey), [{ channel: "C2", ts: "2.0" }]);
 });
 
 // ---------------------------------------------------------------- run (discovery, no cached match)
@@ -598,7 +629,7 @@ test("run: with no cached match, paginates channels.list (filtered to is_member)
 		"reactions.get": [reactionsGetWith([]), reactionsGetWith([])],
 		"reactions.add": [{ body: { ok: true } }, { body: { ok: true } }],
 	});
-	const { run, prMatches, prKey } = setupRun({
+	const { run, state, prKey } = setupRun({
 		slack,
 		job: { desired: new Set(["x"]), managed: new Set(["x"]) },
 		cached: null,
@@ -619,12 +650,16 @@ test("run: with no cached match, paginates channels.list (filtered to is_member)
 		new Set(["C1", "C3"]),
 	);
 	assert.deepEqual(
-		new Set(prMatches.get(prKey).map((m) => m.channel)),
+		new Set(state.getLinks(prKey).map((m) => m.channel)),
 		new Set(["C1", "C3"]),
 	);
 });
 
 test("run: discovery rejects /pull/123 ↔ /pull/1234 substring trap", async (t) => {
+	const wrongPRMsg = {
+		ts: "1.0",
+		text: "see <https://github.com/octo/hello/pull/1234>",
+	};
 	const { slack } = slackFor(t, {
 		"conversations.list": [
 			{
@@ -636,29 +671,21 @@ test("run: discovery rejects /pull/123 ↔ /pull/1234 substring trap", async (t)
 			},
 		],
 		"conversations.history": [
-			{
-				body: {
-					ok: true,
-					messages: [
-						{
-							ts: "1.0",
-							text: "see <https://github.com/octo/hello/pull/1234>",
-						},
-					],
-					has_more: false,
-				},
-			},
+			// Ingest pass (finds PR #1234, not #42).
+			{ body: { ok: true, messages: [wrongPRMsg], has_more: false } },
+			// Backfill for PR #42 (still no match → stored as []).
+			{ body: { ok: true, messages: [wrongPRMsg], has_more: false } },
 		],
 	});
-	const { run, prMatches, prKey } = setupRun({
+	const { run, state, prKey } = setupRun({
 		slack,
 		job: { desired: new Set(["x"]), managed: new Set(["x"]) },
 		cached: null,
 	});
 	await run();
-	// No reactions.add (no match), no entry in cache (terminal-ish empty
-	// → delete handled by the "non-terminal + nothing surviving" branch).
-	assert.equal(prMatches.get(prKey), undefined);
+	// No reactions.add (no match); entry stored as [] to prevent repeated
+	// backfill scans on future events for this PR.
+	assert.deepEqual(state.getLinks(prKey), []);
 });
 
 test("run: discovery extracts PR URL from message blocks (not just text)", async (t) => {
@@ -694,13 +721,13 @@ test("run: discovery extracts PR URL from message blocks (not just text)", async
 		"reactions.get": [reactionsGetWith([])],
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	const { run, prMatches, prKey } = setupRun({
+	const { run, state, prKey } = setupRun({
 		slack,
 		job: { desired: new Set(["x"]), managed: new Set(["x"]) },
 		cached: null,
 	});
 	await run();
-	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "1.5" }]);
+	assert.deepEqual(state.getLinks(prKey), [{ channel: "C1", ts: "1.5" }]);
 });
 
 test("run: thread_broadcast inheriting parent's PR link → react on parent", async (t) => {
@@ -738,13 +765,13 @@ test("run: thread_broadcast inheriting parent's PR link → react on parent", as
 		"reactions.get": [reactionsGetWith([])],
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	const { run, prMatches, prKey } = setupRun({
+	const { run, state, prKey } = setupRun({
 		slack,
 		job: { desired: new Set(["x"]), managed: new Set(["x"]) },
 		cached: null,
 	});
 	await run();
-	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "1.0" }]);
+	assert.deepEqual(state.getLinks(prKey), [{ channel: "C1", ts: "1.0" }]);
 });
 
 test("run: thread_broadcast carrying its own PR link → react on broadcast", async (t) => {
@@ -778,11 +805,195 @@ test("run: thread_broadcast carrying its own PR link → react on broadcast", as
 		"reactions.get": [reactionsGetWith([])],
 		"reactions.add": [{ body: { ok: true } }],
 	});
-	const { run, prMatches, prKey } = setupRun({
+	const { run, state, prKey } = setupRun({
 		slack,
 		job: { desired: new Set(["x"]), managed: new Set(["x"]) },
 		cached: null,
 	});
 	await run();
-	assert.deepEqual(prMatches.get(prKey), [{ channel: "C1", ts: "2.0" }]);
+	assert.deepEqual(state.getLinks(prKey), [{ channel: "C1", ts: "2.0" }]);
+});
+
+// ---------------------------------------------------------------- incremental ingest (new tests)
+
+test("ingest: multiple messages in one channel both linking the PR are all indexed and reacted (bug A fix)", async (t) => {
+	const msg1 = { ts: "2.0", text: "see <https://github.com/octo/hello/pull/42> — heads up" };
+	const msg2 = { ts: "1.0", text: "PR opened: https://github.com/octo/hello/pull/42" };
+	const { slack, calls } = slackFor(t, {
+		"conversations.list": [
+			{
+				body: {
+					ok: true,
+					channels: [{ id: "C1", name: "general", is_member: true }],
+					response_metadata: { next_cursor: "" },
+				},
+			},
+		],
+		"conversations.history": [
+			{ body: { ok: true, messages: [msg1, msg2], has_more: false } },
+		],
+		"reactions.get": [reactionsGetWith([]), reactionsGetWith([])],
+		"reactions.add": [{ body: { ok: true } }, { body: { ok: true } }],
+	});
+	const { run, state, prKey } = setupRun({
+		slack,
+		job: { desired: new Set(["x"]), managed: new Set(["x"]) },
+		cached: null,
+	});
+	await run();
+	assert.deepEqual(
+		new Set(state.getLinks(prKey).map((m) => m.ts)),
+		new Set(["2.0", "1.0"]),
+	);
+	assert.equal(calls.filter((c) => c.method === "reactions.add").length, 2);
+});
+
+test("ingest: incremental — uses channel cursor so only new messages are fetched", async (t) => {
+	const newMsg = { ts: "2000.0", text: "https://github.com/octo/hello/pull/42" };
+	const { slack, calls } = slackFor(t, {
+		"conversations.list": [
+			{
+				body: {
+					ok: true,
+					channels: [{ id: "C1", name: "general", is_member: true }],
+					response_metadata: { next_cursor: "" },
+				},
+			},
+		],
+		"conversations.history": [
+			{ body: { ok: true, messages: [newMsg], has_more: false } },
+		],
+		"reactions.get": [reactionsGetWith([])],
+		"reactions.add": [{ body: { ok: true } }],
+	});
+	// Seed empty entry + cursor — link was posted after the last ingest run.
+	const { run, state, prKey } = setupRun({
+		slack,
+		job: { desired: new Set(["x"]), managed: new Set(["x"]) },
+		cached: [],
+		cursors: { C1: "1000.0" },
+		noChannelCache: true,
+	});
+	await run();
+
+	const histCall = calls.find((c) => c.method === "conversations.history");
+	assert.equal(histCall.params.oldest, "1000.0");
+	assert.deepEqual(state.getLinks(prKey), [{ channel: "C1", ts: "2000.0" }]);
+	assert.equal(calls.filter((c) => c.method === "reactions.add").length, 1);
+});
+
+test("ingest: cold-start — no cursor triggers full HISTORY_LOOKBACK_S scan and advances cursor", async (t) => {
+	const msg = { ts: "500.0", text: "https://github.com/octo/hello/pull/42" };
+	const { slack, calls } = slackFor(t, {
+		"conversations.list": [
+			{
+				body: {
+					ok: true,
+					channels: [{ id: "C1", name: "general", is_member: true }],
+					response_metadata: { next_cursor: "" },
+				},
+			},
+		],
+		"conversations.history": [
+			{ body: { ok: true, messages: [msg], has_more: false } },
+		],
+		"reactions.get": [reactionsGetWith([])],
+		"reactions.add": [{ body: { ok: true } }],
+	});
+	const { run, state, prKey } = setupRun({
+		slack,
+		job: { desired: new Set(["x"]), managed: new Set(["x"]) },
+		cached: null,
+		noChannelCache: true,
+	});
+	await run();
+
+	const histCall = calls.find((c) => c.method === "conversations.history");
+	const expectedOldest = Math.floor(Date.now() / 1000) - 30 * 24 * 3600;
+	assert.ok(
+		Math.abs(Number(histCall.params.oldest) - expectedOldest) < 5,
+		`expected oldest≈${expectedOldest}, got ${histCall.params.oldest}`,
+	);
+	assert.equal(state.getCursor("C1"), "500.0");
+	assert.deepEqual(state.getLinks(prKey), [{ channel: "C1", ts: "500.0" }]);
+});
+
+test("ingest: fallback backward scan fires when entry is missing despite existing cursor", async (t) => {
+	const oldMsg = { ts: "500.0", text: "https://github.com/octo/hello/pull/42" };
+	const { slack, calls } = slackFor(t, {
+		"conversations.list": [
+			{
+				body: {
+					ok: true,
+					channels: [{ id: "C1", name: "general", is_member: true }],
+					response_metadata: { next_cursor: "" },
+				},
+			},
+		],
+		"conversations.history": [
+			// Ingest: oldest="1000.0" → nothing newer than cursor.
+			{ body: { ok: true, messages: [], has_more: false } },
+			// Fallback: full lookback → finds the old linking message.
+			{ body: { ok: true, messages: [oldMsg], has_more: false } },
+		],
+		"reactions.get": [reactionsGetWith([])],
+		"reactions.add": [{ body: { ok: true } }],
+	});
+	const { run, state, prKey } = setupRun({
+		slack,
+		job: { desired: new Set(["x"]), managed: new Set(["x"]) },
+		cached: null,
+		cursors: { C1: "1000.0" },
+		noChannelCache: true,
+	});
+	await run();
+
+	assert.deepEqual(state.getLinks(prKey), [{ channel: "C1", ts: "500.0" }]);
+	assert.equal(calls.filter((c) => c.method === "reactions.add").length, 1);
+	assert.equal(
+		calls.filter((c) => c.method === "conversations.history").length,
+		2,
+	);
+	const [ingestCall, fallbackCall] = calls.filter(
+		(c) => c.method === "conversations.history",
+	);
+	assert.equal(ingestCall.params.oldest, "1000.0");
+	const expectedOldest = Math.floor(Date.now() / 1000) - 30 * 24 * 3600;
+	assert.ok(
+		Math.abs(Number(fallbackCall.params.oldest) - expectedOldest) < 5,
+		`expected fallback oldest≈${expectedOldest}, got ${fallbackCall.params.oldest}`,
+	);
+});
+
+test("ingest: stored [] entry prevents repeated fallback scan on subsequent events", async (t) => {
+	// [] entry — ingest runs, fallback must not fire again.
+	const { slack, calls } = slackFor(t, {
+		"conversations.list": [
+			{
+				body: {
+					ok: true,
+					channels: [{ id: "C1", name: "general", is_member: true }],
+					response_metadata: { next_cursor: "" },
+				},
+			},
+		],
+		"conversations.history": [
+			// Only one scripted response: the ingest call.
+			// If fallback ran it would throw "no scripted response".
+			{ body: { ok: true, messages: [], has_more: false } },
+		],
+	});
+	const { state, fullJob } = setupRun({
+		slack,
+		cached: [],
+		cursors: { C1: "1000.0" },
+		noChannelCache: true,
+	});
+	const matches = await findMatches(slack, state, fullJob);
+
+	assert.equal(
+		calls.filter((c) => c.method === "conversations.history").length,
+		1,
+	);
+	assert.deepEqual(matches, []);
 });
